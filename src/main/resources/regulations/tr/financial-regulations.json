@@ -1,0 +1,98 @@
+[
+  {
+    "id": "TKHK-4",
+    "source": "6502 Sayılı Tüketicinin Korunması Hakkında Kanun",
+    "article": "Madde 4",
+    "title": "Temel ilkeler",
+    "text": "Tüketici sözleşmeleri açık, sade ve okunabilir şekilde düzenlenmeli; tüketici aleyhine tek taraflı değişiklik yapılamamalı ve tüketiciden talep edilen her türlü ücret ve masrafa ilişkin bilgiler sözleşmede yer almalıdır.",
+    "keywords": ["tüketici", "sözleşme", "ücret", "masraf", "değişiklik", "açık", "okunabilir"]
+  },
+  {
+    "id": "TKHK-5",
+    "source": "6502 Sayılı Tüketicinin Korunması Hakkında Kanun",
+    "article": "Madde 5",
+    "title": "Haksız şartlar",
+    "text": "Tüketiciyle müzakere edilmeden sözleşmeye dahil edilen ve dürüstlük kuralına aykırı biçimde tüketici aleyhine dengesizliğe neden olan şartlar haksız şarttır ve kesin olarak hükümsüzdür.",
+    "keywords": ["haksız", "şart", "müzakere", "tek taraflı", "dengesizlik", "hükümsüz"]
+  },
+  {
+    "id": "TKHK-22-31",
+    "source": "6502 Sayılı Tüketicinin Korunması Hakkında Kanun",
+    "article": "Maddeler 22-31",
+    "title": "Tüketici kredileri",
+    "text": "Tüketici kredisi sözleşmesinden önce bilgilendirme yapılmalı; faiz, toplam kredi maliyeti, cayma ve erken ödeme hakları ile temerrüdün sonuçları açıkça belirtilmelidir.",
+    "keywords": ["kredi", "faiz", "cayma", "erken ödeme", "temerrüt", "toplam maliyet", "bilgilendirme"]
+  },
+  {
+    "id": "TKHK-31",
+    "source": "6502 Sayılı Tüketicinin Korunması Hakkında Kanun",
+    "article": "Madde 31",
+    "title": "Bağlı kredi ve sigorta",
+    "text": "Tüketici kredilerinde tüketicinin açık talebi olmaksızın krediyle ilgili sigorta yaptırılamaz; tüketicinin seçtiği sigorta şirketinden sağlanan teminat kabul edilmelidir.",
+    "keywords": ["sigorta", "kredi", "açık talep", "teminat", "poliçe"]
+  },
+  {
+    "id": "TKHK-23",
+    "source": "6502 Sayılı Tüketicinin Korunması Hakkında Kanun",
+    "article": "Madde 23",
+    "title": "Kredi sözleşmesinin şekli",
+    "text": "Tüketici kredisi sözleşmesi yazılı veya mesafeli olarak kurulmalı ve bir nüshası tüketiciye verilmelidir. Sözleşme şartları tüketici aleyhine değiştirilemez.",
+    "keywords": ["kredi sözleşmesi", "nüsha", "yazılı", "mesafeli", "değişiklik"]
+  },
+  {
+    "id": "BANK-73",
+    "source": "5411 Sayılı Bankacılık Kanunu",
+    "article": "Madde 73",
+    "title": "Sırların saklanması",
+    "text": "Banka ve müşteri sırrı niteliğindeki bilgiler, kanunda belirtilen istisnalar dışında yetkisiz kişilere açıklanamaz ve amacı dışında kullanılamaz.",
+    "keywords": ["müşteri sırrı", "kişisel veri", "gizlilik", "paylaşım", "üçüncü kişi", "açıklama"]
+  },
+  {
+    "id": "BANK-76",
+    "source": "5411 Sayılı Bankacılık Kanunu",
+    "article": "Madde 76",
+    "title": "Müşteri hakları",
+    "text": "Bankalar müşterilerini sundukları hizmetlerin içeriği ve her türlü ücret, komisyon ve masraf hakkında bilgilendirmek ve talep halinde işlem belgelerini vermekle yükümlüdür.",
+    "keywords": ["müşteri", "ücret", "komisyon", "masraf", "bilgilendirme", "işlem belgesi"]
+  },
+  {
+    "id": "TCMB-UCRET",
+    "source": "TCMB Finansal Tüketicilerden Alınacak Ücretlere İlişkin Usul ve Esaslar Tebliği",
+    "article": "Ücretlendirme hükümleri",
+    "title": "Finansal tüketici ücretleri",
+    "text": "Finansal tüketicilerden yalnızca düzenlemede izin verilen hizmetler için ücret alınabilir; ücretin niteliği, tutarı veya oranı ve değişiklik bildirimleri açıkça gösterilmelidir.",
+    "keywords": ["ücret", "komisyon", "hesap işletim", "kart aidatı", "bildirim", "finansal tüketici"]
+  },
+  {
+    "id": "TCMB-KART",
+    "source": "TCMB düzenlemeleri",
+    "article": "Kredi kartı işlemlerinde faiz hükümleri",
+    "title": "Kredi kartı faiz ve gecikme sınırları",
+    "text": "Kredi kartı akdi ve gecikme faiz oranları TCMB tarafından ilan edilen azami oranları aşmamalı; hesap özetinde uygulanan oran ve borç bilgileri açıkça yer almalıdır.",
+    "keywords": ["kredi kartı", "akdi faiz", "gecikme faizi", "hesap özeti", "asgari ödeme"]
+  },
+  {
+    "id": "BDDK-KREDI",
+    "source": "BDDK düzenlemeleri",
+    "article": "Kredi işlemleri ve risk yönetimi hükümleri",
+    "title": "Kredi tahsis ve izleme",
+    "text": "Kredi süreçlerinde müşterinin ödeme gücü, teminatlar, vade, geri ödeme planı ve kredi koşulları tutarlı biçimde belgelenmeli; yanıltıcı veya eksik kayıt oluşturulmamalıdır.",
+    "keywords": ["kredi", "ödeme gücü", "teminat", "vade", "geri ödeme planı", "risk"]
+  },
+  {
+    "id": "BDDK-KART",
+    "source": "BDDK Banka Kartları ve Kredi Kartları Hakkında Yönetmelik",
+    "article": "Sözleşme ve bilgilendirme hükümleri",
+    "title": "Kart sözleşmeleri",
+    "text": "Kart sözleşmesinde limit, faiz, ücret, hesap kesim tarihi, asgari ödeme, temerrüt ve fesih koşulları anlaşılır biçimde yer almalı; değişiklikler kart hamiline bildirilmelidir.",
+    "keywords": ["kart", "limit", "faiz", "asgari ödeme", "hesap kesim", "fesih", "temerrüt"]
+  },
+  {
+    "id": "BDDK-BILGI",
+    "source": "BDDK düzenlemeleri",
+    "article": "Bilgi sistemleri ve elektronik bankacılık hükümleri",
+    "title": "Güvenlik ve kayıt bütünlüğü",
+    "text": "Elektronik bankacılık işlemlerinde kimlik doğrulama, işlem güvenliği, müşteri bilgilendirmesi ve kayıtların bütünlüğü sağlanmalıdır.",
+    "keywords": ["elektronik bankacılık", "kimlik doğrulama", "güvenlik", "kayıt", "işlem", "bildirim"]
+  }
+]

@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: audittrove
+  servlet:
+    multipart:
+      max-file-size: ${MAX_FILE_SIZE:15MB}
+      max-request-size: ${MAX_FILE_SIZE:15MB}
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+  forward-headers-strategy: framework
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+audittrove:
+  max-pdf-bytes: ${MAX_PDF_BYTES:15728640}
+  openai:
+    api-key: ${OPENAI_API_KEY:}
+    base-url: ${OPENAI_BASE_URL:https://api.openai.com}
+    model: ${OPENAI_MODEL:gpt-4.1-mini}
+    timeout-seconds: ${OPENAI_TIMEOUT_SECONDS:90}
+  rag:
+    result-limit: ${RAG_RESULT_LIMIT:8}
+    database:
+      url: ${RAG_DATABASE_URL:}
+      username: ${RAG_DATABASE_USERNAME:}
+      password: ${RAG_DATABASE_PASSWORD:}
+      migrate: ${RAG_DATABASE_MIGRATE:true}
+logging:
+  level:
+    root: INFO
+    com.audittrove: INFO

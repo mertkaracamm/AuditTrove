@@ -1,0 +1,88 @@
+package com.audittrove.mcp;
+
+import com.audittrove.audit.FinancialDocumentAuditService;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+
+@RestController
+public class McpController {
+    private final FinancialDocumentAuditService auditService;
+    private final ObjectMapper objectMapper;
+
+    public McpController(FinancialDocumentAuditService auditService, ObjectMapper objectMapper) {
+        this.auditService = auditService;
+        this.objectMapper = objectMapper;
+    }
+
+    @PostMapping(value = "/mcp", consumes = MediaType.APPLICATION_JSON_VALUE,
+            produces = MediaType.APPLICATION_JSON_VALUE)
+    public Map<String, Object> handle(@RequestBody JsonNode request) {
+        Object id = request.has("id") ? objectMapper.convertValue(request.get("id"), Object.class) : null;
+        try {
+            return switch (request.path("method").asText()) {
+                case "initialize" -> success(id, Map.of(
+                        "protocolVersion", "2025-06-18",
+                        "capabilities", Map.of("tools", Map.of()),
+                        "serverInfo", Map.of("name", "audittrove", "version", "1.0.0")));
+                case "ping" -> success(id, Map.of());
+                case "tools/list" -> success(id, Map.of("tools", List.of(auditTool())));
+                case "tools/call" -> callTool(id, request.path("params"));
+                default -> error(id, -32601, "Method not found");
+            };
+        } catch (IllegalArgumentException exception) {
+            return error(id, -32602, exception.getMessage());
+        } catch (Exception exception) {
+            return error(id, -32603, "Audit could not be completed");
+        }
+    }
+
+    private Map<String, Object> callTool(Object id, JsonNode params) throws Exception {
+        if (!"audit_financial_document".equals(params.path("name").asText())) {
+            return error(id, -32602, "Unknown tool");
+        }
+        JsonNode arguments = params.path("arguments");
+        String filename = arguments.path("filename").asText();
+        byte[] pdf = Base64.getDecoder().decode(arguments.path("pdfBase64").asText());
+        String result = objectMapper.writeValueAsString(auditService.audit(filename, pdf));
+        return success(id, Map.of(
+                "content", List.of(Map.of("type", "text", "text", result)),
+                "structuredContent", objectMapper.readTree(result)));
+    }
+
+    private Map<String, Object> auditTool() {
+        return Map.of(
+                "name", "audit_financial_document",
+                "title", "Finansal Doküman Denetimi",
+                "description", "Kullanıcının sağladığı PDF finansal dokümanı Türk finans mevzuatına göre denetler. "
+                        + "Belgeden çıkarılan metin yapay zekâ analizi için OpenAI API'ye gönderilir. "
+                        + "Sonuçlar bilgilendirme amaçlıdır ve profesyonel finansal veya hukuki tavsiye değildir.",
+                "annotations", Map.of(
+                        "readOnlyHint", true,
+                        "openWorldHint", true,
+                        "destructiveHint", false),
+                "inputSchema", Map.of(
+                        "type", "object",
+                        "additionalProperties", false,
+                        "required", List.of("filename", "pdfBase64"),
+                        "properties", Map.of(
+                                "filename", Map.of("type", "string", "description", "PDF dosya adı"),
+                                "pdfBase64", Map.of("type", "string", "description", "Base64 kodlu PDF"))));
+    }
+
+    private Map<String, Object> success(Object id, Object result) {
+        return Map.of("jsonrpc", "2.0", "id", id == null ? "" : id, "result", result);
+    }
+
+    private Map<String, Object> error(Object id, int code, String message) {
+        return Map.of("jsonrpc", "2.0", "id", id == null ? "" : id,
+                "error", Map.of("code", code, "message", message));
+    }
+}
