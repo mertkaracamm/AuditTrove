@@ -8,6 +8,6 @@ import org.springframework.web.bind.annotation.RestController;
 public class DomainVerificationController {
     @GetMapping(value = "/.well-known/openai-apps-challenge", produces = MediaType.TEXT_PLAIN_VALUE)
     public String challenge() {
-        return "M06KfurR5CoeBTnr0Dx6ZMPF54dZ5cJ1bLENSR480SU";
+        return "M06KfurR5CoeBTnr0Dx6ZMPF54dZ5cJlbLENSR480SU";
     }
 }
