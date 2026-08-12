@@ -15,7 +15,15 @@ public class PdfTextExtractor {
             if (document.isEncrypted()) {
                 throw new InvalidDocumentException("Şifreli PDF dosyaları desteklenmiyor");
             }
-            String text = new PDFTextStripper().getText(document).trim();
+            StringBuilder textWithPageMarkers = new StringBuilder();
+            for (int page = 1; page <= document.getNumberOfPages(); page++) {
+                PDFTextStripper stripper = new PDFTextStripper();
+                stripper.setStartPage(page);
+                stripper.setEndPage(page);
+                textWithPageMarkers.append("\n\n[REPORT PAGE ").append(page).append("]\n")
+                        .append(stripper.getText(document));
+            }
+            String text = textWithPageMarkers.toString().trim();
             if (text.length() < 40) {
                 throw new InvalidDocumentException("PDF içinde analiz edilebilir metin bulunamadı");
             }

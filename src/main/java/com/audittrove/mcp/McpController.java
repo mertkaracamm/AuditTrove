@@ -50,7 +50,7 @@ public class McpController {
         }
         JsonNode arguments = params.path("arguments");
         String filename = arguments.path("filename").asText();
-        byte[] pdf = Base64.getDecoder().decode(arguments.path("pdfBase64").asText());
+        byte[] pdf = decodePdf(arguments.path("pdfBase64").asText());
         String result = objectMapper.writeValueAsString(auditService.audit(filename, pdf));
         return success(id, Map.of(
                 "content", List.of(Map.of("type", "text", "text", result)),
@@ -75,6 +75,30 @@ public class McpController {
                         "properties", Map.of(
                                 "filename", Map.of("type", "string", "description", "PDF dosya adı"),
                                 "pdfBase64", Map.of("type", "string", "description", "Base64 kodlu PDF"))));
+    }
+
+    /** Accept standard and URL-safe Base64 payloads sent by MCP clients. */
+    private byte[] decodePdf(String encodedPdf) {
+        if (encodedPdf == null || encodedPdf.isBlank()) {
+            throw new IllegalArgumentException("PDF içeriği eksik");
+        }
+
+        String normalized = encodedPdf.trim();
+        int dataSeparator = normalized.indexOf(',');
+        if (normalized.regionMatches(true, 0, "data:", 0, 5) && dataSeparator >= 0) {
+            normalized = normalized.substring(dataSeparator + 1);
+        }
+        normalized = normalized.replaceAll("\\s", "");
+
+        try {
+            return Base64.getDecoder().decode(normalized);
+        } catch (IllegalArgumentException standardEncodingFailure) {
+            try {
+                return Base64.getUrlDecoder().decode(normalized);
+            } catch (IllegalArgumentException urlEncodingFailure) {
+                throw new IllegalArgumentException("PDF Base64 içeriği geçersiz");
+            }
+        }
     }
 
     private Map<String, Object> success(Object id, Object result) {

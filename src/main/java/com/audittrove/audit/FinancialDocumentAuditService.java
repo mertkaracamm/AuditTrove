@@ -44,7 +44,9 @@ public class FinancialDocumentAuditService {
         validate(filename, content);
         try {
             String text = pdfTextExtractor.extract(content);
-            List<RegulationChunk> context = regulationRetriever.retrieve(text);
+            // Financial statements should be evaluated on their own merits.
+            // The bundled consumer-finance corpus is not relevant to annual reports.
+            List<RegulationChunk> context = List.of();
             return llmClient.audit(text, context);
         } catch (IOException exception) {
             throw new InvalidDocumentException("PDF okunamadı", exception);
