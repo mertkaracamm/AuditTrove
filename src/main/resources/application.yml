@@ -25,6 +25,11 @@ springdoc:
     path: /swagger-ui.html
 audittrove:
   max-pdf-bytes: ${MAX_PDF_BYTES:15728640}
+  security:
+    # Bos birakilirsa mobil auth filtresi pasif kalir (mevcut davranis).
+    # Deploy oncesi guclu bir rastgele deger verilmeli: MOBILE_TOKEN_SECRET
+    token-secret: ${MOBILE_TOKEN_SECRET:}
+    audit-rate-limit-per-hour: ${AUDIT_RATE_LIMIT_PER_HOUR:5}
   openai:
     api-key: ${OPENAI_API_KEY:}
     base-url: ${OPENAI_BASE_URL:https://api.openai.com}
