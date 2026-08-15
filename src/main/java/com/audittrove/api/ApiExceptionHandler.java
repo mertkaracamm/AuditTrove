@@ -10,18 +10,23 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
     private static final Logger log = LoggerFactory.getLogger(ApiExceptionHandler.class);
 
     @ExceptionHandler({InvalidDocumentException.class, MethodArgumentNotValidException.class,
-            MaxUploadSizeExceededException.class})
+        MaxUploadSizeExceededException.class, MissingServletRequestPartException.class,
+        HttpMediaTypeNotSupportedException.class, HttpMessageNotReadableException.class})
     ProblemDetail badRequest(Exception exception) {
-        ProblemDetail detail = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, exception.getMessage());
-        detail.setTitle("Geçersiz doküman");
-        return detail;
-    }
+    ProblemDetail detail = ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST,
+            "Geçersiz istek: dosya veya istek gövdesi eksik ya da hatalı.");
+    detail.setTitle("Geçersiz istek");
+    return detail;
+}
 
     @ExceptionHandler(LlmUnavailableException.class)
     ProblemDetail serviceUnavailable(LlmUnavailableException exception) {
@@ -40,4 +45,5 @@ public class ApiExceptionHandler {
         detail.setTitle("İşlem tamamlanamadı");
         return detail;
     }
+    
 }
