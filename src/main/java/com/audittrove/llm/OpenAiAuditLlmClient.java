@@ -22,7 +22,12 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             Focus on financial performance, material changes, concentration, liquidity, leverage, cash flow,
             accounting judgements, and audit matters that warrant attention. Do not invent compliance, consumer-credit,
             legal, or regulatory issues when the document is an annual report or financial statement.
-            Risk score must be 0 (no material concerns) to 100 (critical concerns). Findings must be concise,
+            Risk score must be 0 (no material concerns) to 100 (critical concerns).
+            Calibrate riskScore strictly from the severity of your own findings:
+            no findings above LOW -> 0-20; only MEDIUM findings -> 21-45 scaled by count and materiality;
+            at least one HIGH finding -> 46-70; any CRITICAL finding, or multiple HIGH findings with
+            liquidity or going-concern signals -> 71-100. The score must always be consistent with
+            the severity distribution of the findings you report. Findings must be concise,
             evidence-based, and written in English. Every finding must cite the supplied REPORT PAGE marker.
             scoreRationale: one sentence explaining what drove the risk score, naming the main positive and negative signals.
             keyMetrics: 3 to 5 headline figures from the document (e.g. revenue, EBITDA margin, net profit, cash) with label, value exactly as written in the document, and a short note (empty string if none). Only include figures explicitly present in the document.
