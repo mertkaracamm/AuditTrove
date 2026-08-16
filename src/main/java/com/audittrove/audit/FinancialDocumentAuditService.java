@@ -34,28 +34,35 @@ public class FinancialDocumentAuditService {
     }
 
     public AuditResponse audit(MultipartFile file, String language) {
+        return audit(file, language, null);
+    }
+
+    public AuditResponse audit(MultipartFile file, String language, String documentType) {
         if (file == null || file.isEmpty()) {
             throw new InvalidDocumentException("PDF dosyası zorunludur");
         }
         try {
-            return audit(file.getOriginalFilename(), file.getBytes(), language);
+            return audit(file.getOriginalFilename(), file.getBytes(), language, documentType);
         } catch (IOException exception) {
             throw new InvalidDocumentException("Dosya okunamadı", exception);
         }
     }
 
     public AuditResponse audit(String filename, byte[] content) {
-        return audit(filename, content, null);
+        return audit(filename, content, null, null);
     }
 
     public AuditResponse audit(String filename, byte[] content, String language) {
+        return audit(filename, content, language, null);
+    }
+
+    public AuditResponse audit(String filename, byte[] content, String language, String documentType) {
         validate(filename, content);
         try {
             String text = pdfTextExtractor.extract(content);
-            // Financial statements should be evaluated on their own merits.
-            // The bundled consumer-finance corpus is not relevant to annual reports.
+            // Belgeler kendi iceriklerine gore degerlendirilir; RAG korpusu aktif degil.
             List<RegulationChunk> context = List.of();
-            return llmClient.audit(text, context, language);
+            return llmClient.audit(text, context, language, documentType);
         } catch (IOException exception) {
             throw new InvalidDocumentException("PDF okunamadı", exception);
         }

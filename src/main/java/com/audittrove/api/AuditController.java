@@ -29,8 +29,9 @@ public class AuditController {
     @Operation(summary = "Finansal PDF dokümanını denetler")
     public AuditResponse audit(@RequestParam("file") MultipartFile file,
                                @RequestParam(value = "language", required = false) String language,
+                               @RequestParam(value = "documentType", required = false) String documentType,
                                HttpServletRequest request) {
-        AuditResponse response = auditService.audit(file, language);
+        AuditResponse response = auditService.audit(file, language, documentType);
         // sayac sadece basarili incelemede artsin
         String deviceId = (String) request.getAttribute(MobileAuthFilter.DEVICE_ID_ATTR);
         Object decision = request.getAttribute(MobileAuthFilter.QUOTA_DECISION_ATTR);
