@@ -48,7 +48,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     }
 
     @Override
-    public AuditResponse audit(String documentText, List<RegulationChunk> context) {
+    public AuditResponse audit(String documentText, List<RegulationChunk> context, String language) {
         if (apiKey.isBlank()) {
             throw new LlmUnavailableException("OPENAI_API_KEY yapılandırılmamış");
         }
@@ -62,7 +62,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                                 "strict", true,
                                 "schema", responseSchema())),
                 "messages", List.of(
-                        Map.of("role", "system", "content", SYSTEM_PROMPT),
+                        Map.of("role", "system", "content", SYSTEM_PROMPT + languageInstruction(language)),
                         Map.of("role", "user", "content", userPrompt(documentText, context))));
         try {
             JsonNode response = restClient.post()
@@ -100,6 +100,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
         return new AuditResponse(response.riskScore(), response.summary(), response.risks(),
                 response.recommendations(), references);
+    }
+
+    private String languageInstruction(String language) {
+        if ("tr".equalsIgnoreCase(language)) {
+            return "\nWrite the summary, all finding titles, evidence sentences and recommendations in Turkish.";
+        }
+        return "";
     }
 
     private String userPrompt(String documentText, List<RegulationChunk> context) {

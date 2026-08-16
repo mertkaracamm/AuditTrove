@@ -6,5 +6,5 @@ import com.audittrove.rag.RegulationChunk;
 import java.util.List;
 
 public interface AuditLlmClient {
-    AuditResponse audit(String documentText, List<RegulationChunk> context);
+    AuditResponse audit(String documentText, List<RegulationChunk> context, String language);
 }

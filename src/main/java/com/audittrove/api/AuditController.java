@@ -27,8 +27,10 @@ public class AuditController {
 
     @PostMapping(value = "/audit", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
     @Operation(summary = "Finansal PDF dokümanını denetler")
-    public AuditResponse audit(@RequestParam("file") MultipartFile file, HttpServletRequest request) {
-        AuditResponse response = auditService.audit(file);
+    public AuditResponse audit(@RequestParam("file") MultipartFile file,
+                               @RequestParam(value = "language", required = false) String language,
+                               HttpServletRequest request) {
+        AuditResponse response = auditService.audit(file, language);
         // sayac sadece basarili incelemede artsin
         String deviceId = (String) request.getAttribute(MobileAuthFilter.DEVICE_ID_ATTR);
         Object decision = request.getAttribute(MobileAuthFilter.QUOTA_DECISION_ATTR);
