@@ -24,6 +24,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             legal, or regulatory issues when the document is an annual report or financial statement.
             Risk score must be 0 (no material concerns) to 100 (critical concerns). Findings must be concise,
             evidence-based, and written in English. Every finding must cite the supplied REPORT PAGE marker.
+            scoreRationale: one sentence explaining what drove the risk score, naming the main positive and negative signals.
+            keyMetrics: 3 to 5 headline figures from the document (e.g. revenue, EBITDA margin, net profit, cash) with label, value exactly as written in the document, and a short note (empty string if none). Only include figures explicitly present in the document.
+            advisorQuestions: 3 short questions the reader should ask their financial advisor or the company, derived from the findings.
             Sadece istenen JSON şemasına uygun yanıt ver.
             """;
 
@@ -98,13 +101,14 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                     .map(chunk -> new AuditResponse.Reference(chunk.source(), chunk.article(), chunk.title()))
                     .toList();
         }
-        return new AuditResponse(response.riskScore(), response.summary(), response.risks(),
-                response.recommendations(), references);
+        return new AuditResponse(response.riskScore(), response.scoreRationale(), response.summary(),
+                response.risks(), response.recommendations(), response.keyMetrics(),
+                response.advisorQuestions(), references);
     }
 
     private String languageInstruction(String language) {
         if ("tr".equalsIgnoreCase(language)) {
-            return "\nWrite the summary, all finding titles, evidence sentences and recommendations in Turkish.";
+            return "\nWrite every textual output field (summary, scoreRationale, finding titles, evidence, recommendations, keyMetrics labels and notes, advisorQuestions) in Turkish.";
         }
         return "";
     }
@@ -143,15 +147,28 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                         "source", Map.of("type", "string"),
                         "article", Map.of("type", "string"),
                         "title", Map.of("type", "string")));
+        Map<String, Object> keyMetric = Map.of(
+                "type", "object",
+                "additionalProperties", false,
+                "required", List.of("label", "value", "note"),
+                "properties", Map.of(
+                        "label", Map.of("type", "string"),
+                        "value", Map.of("type", "string"),
+                        "note", Map.of("type", "string")));
+        Map<String, Object> props = new java.util.LinkedHashMap<String, Object>();
+        props.put("riskScore", Map.of("type", "integer", "minimum", 0, "maximum", 100));
+        props.put("scoreRationale", Map.of("type", "string"));
+        props.put("summary", Map.of("type", "string"));
+        props.put("risks", Map.of("type", "array", "items", risk));
+        props.put("recommendations", Map.of("type", "array", "items", Map.of("type", "string")));
+        props.put("keyMetrics", Map.of("type", "array", "items", keyMetric));
+        props.put("advisorQuestions", Map.of("type", "array", "items", Map.of("type", "string")));
+        props.put("references", Map.of("type", "array", "items", reference));
         return Map.of(
                 "type", "object",
                 "additionalProperties", false,
-                "required", List.of("riskScore", "summary", "risks", "recommendations", "references"),
-                "properties", Map.of(
-                        "riskScore", Map.of("type", "integer", "minimum", 0, "maximum", 100),
-                        "summary", Map.of("type", "string"),
-                        "risks", Map.of("type", "array", "items", risk),
-                        "recommendations", Map.of("type", "array", "items", Map.of("type", "string")),
-                        "references", Map.of("type", "array", "items", reference)));
+                "required", List.of("riskScore", "scoreRationale", "summary", "risks",
+                        "recommendations", "keyMetrics", "advisorQuestions", "references"),
+                "properties", props);
     }
 }
