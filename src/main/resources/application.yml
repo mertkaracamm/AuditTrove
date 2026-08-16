@@ -30,6 +30,12 @@ audittrove:
     # Deploy oncesi guclu bir rastgele deger verilmeli: MOBILE_TOKEN_SECRET
     token-secret: ${MOBILE_TOKEN_SECRET:}
     audit-rate-limit-per-hour: ${AUDIT_RATE_LIMIT_PER_HOUR:5}
+    # RevenueCat secret API key (sk_...). Bos ise herkes ucretsiz sayilir.
+    revenuecat-api-key: ${REVENUECAT_API_KEY:}
+    # Aylik kullanim sayaclarinin tutuldugu Postgres. Bos ise kota uygulanmaz.
+    usage-database-url: ${USAGE_DATABASE_URL:}
+    # Ucretsiz kullanicinin aylik inceleme hakki
+    free-monthly-limit: ${FREE_MONTHLY_LIMIT:5}
   openai:
     api-key: ${OPENAI_API_KEY:}
     base-url: ${OPENAI_BASE_URL:https://api.openai.com}

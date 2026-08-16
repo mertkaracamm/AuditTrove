@@ -14,18 +14,15 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Mobil denetim endpoint'i (/api/v1/audit) için Bearer token doğrulaması
- * ve cihaz başına saatlik rate limit.
- *
- * Kapsam bilinçli olarak dardır: /mcp, domain verification, actuator,
- * swagger ve diğer tüm endpoint'lere dokunmaz. Secret tanımlı değilse
- * filtre tamamen pasiftir (mevcut davranış korunur).
- */
+// /api/v1/audit icin token dogrulama + rate limit. Diger endpointlere karismaz.
 @Component
 public class MobileAuthFilter extends OncePerRequestFilter {
 
+    public static final String DEVICE_ID_ATTR = "audittrove.deviceId";
+    public static final String QUOTA_DECISION_ATTR = "audittrove.quotaDecision";
+
     private final DeviceTokenService tokenService;
+    private final QuotaService quotaService;
     private final int limitPerHour;
 
     /** deviceId -> (pencere başlangıç saati, sayaç) */
@@ -35,8 +32,10 @@ public class MobileAuthFilter extends OncePerRequestFilter {
 
     public MobileAuthFilter(
             DeviceTokenService tokenService,
+            QuotaService quotaService,
             @Value("${audittrove.security.audit-rate-limit-per-hour:5}") int limitPerHour) {
         this.tokenService = tokenService;
+        this.quotaService = quotaService;
         this.limitPerHour = limitPerHour;
     }
 
@@ -69,6 +68,20 @@ public class MobileAuthFilter extends OncePerRequestFilter {
             return;
         }
 
+        QuotaService.Decision decision = quotaService.check(deviceId.get());
+        if (decision == QuotaService.Decision.MONTHLY_LIMIT_REACHED) {
+            response.setStatus(HttpServletResponse.SC_PAYMENT_REQUIRED);
+            response.setContentType(MediaType.APPLICATION_JSON_VALUE);
+            response.setCharacterEncoding("UTF-8");
+            response.getWriter().write(
+                    "{\"error\":\"Aylık ücretsiz inceleme hakkınız doldu.\","
+                            + "\"code\":\"MONTHLY_LIMIT_REACHED\","
+                            + "\"freeMonthlyLimit\":" + quotaService.freeMonthlyLimit() + "}");
+            return;
+        }
+
+        request.setAttribute(DEVICE_ID_ATTR, deviceId.get());
+        request.setAttribute(QUOTA_DECISION_ATTR, decision);
         chain.doFilter(request, response);
     }
 
@@ -78,7 +91,6 @@ public class MobileAuthFilter extends OncePerRequestFilter {
                 cur == null || cur.hourEpoch() != hour
                         ? new Window(hour, new AtomicInteger())
                         : cur);
-        // Eski pencereleri ara sıra temizle (bellek büyümesin)
         if (windows.size() > 10_000) {
             windows.entrySet().removeIf(e -> e.getValue().hourEpoch() != hour);
         }

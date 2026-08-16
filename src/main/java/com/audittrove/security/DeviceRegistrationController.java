@@ -14,10 +14,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.Map;
 
-/**
- * Mobil istemcinin ilk açılışta kendini kaydettiği endpoint.
- * Cihaz, ürettiği UUID ile buraya gelir ve imzalı bir erişim token'ı alır.
- */
 @RestController
 @RequestMapping("/api/v1")
 @Tag(name = "Device Registration")

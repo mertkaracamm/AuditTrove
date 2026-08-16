@@ -10,15 +10,7 @@ import java.security.MessageDigest;
 import java.util.Base64;
 import java.util.Optional;
 
-/**
- * Cihaz bazlı, stateless token üretimi ve doğrulaması.
- *
- * Token biçimi: base64url(deviceId:issuedAtEpochSeconds) + "." + base64url(HMAC-SHA256(payload))
- *
- * Veritabanı gerektirmez; doğrulama imzanın yeniden hesaplanmasıyla yapılır.
- * Secret (MOBILE_TOKEN_SECRET) tanımlı değilse servis pasif kalır ve
- * MobileAuthFilter devreye girmez (mevcut davranış korunur).
- */
+// hmac imzali cihaz tokenlari, db gerektirmez
 @Service
 public class DeviceTokenService {
 
@@ -43,7 +35,6 @@ public class DeviceTokenService {
                 + "." + B64E.encodeToString(hmac(payload));
     }
 
-    /** Geçerliyse cihaz kimliğini döner, değilse boş. */
     public Optional<String> verify(String token) {
         if (token == null || secret == null) return Optional.empty();
         int dot = token.indexOf('.');
