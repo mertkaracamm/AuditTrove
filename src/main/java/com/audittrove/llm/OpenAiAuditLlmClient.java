@@ -11,8 +11,19 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.SortedSet;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @Component
 public class OpenAiAuditLlmClient implements AuditLlmClient {
@@ -100,7 +111,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 throw new LlmUnavailableException("LLM boş yanıt döndürdü");
             }
             AuditResponse responseBody = objectMapper.readValue(content, AuditResponse.class);
-            return groundReferences(responseBody, context);
+            return postProcess(responseBody, context, documentText, language);
         } catch (LlmUnavailableException exception) {
             throw exception;
         } catch (Exception exception) {
@@ -108,23 +119,126 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
     }
 
-    private AuditResponse groundReferences(AuditResponse response, List<RegulationChunk> context) {
-        if (context.isEmpty()) {
-            return response;
+    private AuditResponse postProcess(AuditResponse response, List<RegulationChunk> context,
+                                      String documentText, String language) {
+        // 1) Mevzuat referansları (yalnizca RAG baglami varsa filtrele/uret)
+        List<AuditResponse.Reference> references = response.references();
+        if (!context.isEmpty()) {
+            references = response.references().stream()
+                    .filter(reference -> context.stream().anyMatch(chunk ->
+                            chunk.source().equals(reference.source()) && chunk.article().equals(reference.article())))
+                    .toList();
+            if (references.isEmpty()) {
+                references = context.stream()
+                        .map(chunk -> new AuditResponse.Reference(chunk.source(), chunk.article(), chunk.title()))
+                        .toList();
+            }
         }
-        List<AuditResponse.Reference> references = response.references().stream()
-                .filter(reference -> context.stream().anyMatch(chunk ->
-                        chunk.source().equals(reference.source()) && chunk.article().equals(reference.article())))
-                .toList();
-        if (references.isEmpty()) {
-            references = context.stream()
-                    .map(chunk -> new AuditResponse.Reference(chunk.source(), chunk.article(), chunk.title()))
+        // 2) Sayfa dogrulama: kanit rakamlarini [REPORT PAGE n] bloklarinda ara,
+        //    model ne derse desin referansi gercek sayfayla degistir
+        Map<Integer, String> pages = splitPages(documentText);
+        boolean turkish = "tr".equalsIgnoreCase(language);
+        String pageWord = turkish ? "Sayfa" : "Page";
+        SortedSet<Integer> allPages = new TreeSet<>();
+        List<AuditResponse.Risk> groundedRisks = new ArrayList<>();
+        for (AuditResponse.Risk risk : response.risks()) {
+            List<Integer> found = groundPages(risk.evidence(), pages);
+            if (found.isEmpty()) {
+                groundedRisks.add(risk); // rakam bulunamadi, modelin dedigini bozma
+                continue;
+            }
+            allPages.addAll(found);
+            String pageList = found.stream().map(String::valueOf).collect(Collectors.joining(", "));
+            String replacement = "(" + pageWord + " " + pageList + ")";
+            String evidence = PAGE_PAREN.matcher(risk.evidence()).replaceAll(Matcher.quoteReplacement(replacement));
+            if (evidence.equals(risk.evidence()) && !evidence.contains(replacement)) {
+                evidence = evidence.stripTrailing() + " " + replacement;
+            }
+            groundedRisks.add(new AuditResponse.Risk(risk.title(), risk.severity(), risk.finding(), evidence));
+        }
+        // RAG kapaliyken referans listesini dogrulanmis sayfalardan uret
+        if (context.isEmpty() && !allPages.isEmpty()) {
+            String prefix = turkish ? "Rapor Sayfa " : "Report Page ";
+            references = allPages.stream()
+                    .map(p -> new AuditResponse.Reference(prefix + p, "", ""))
                     .toList();
         }
-        int calibratedScore = calibrateScore(response.riskScore(), response.risks());
+        // 3) Skor kelepcesi (RAG bos olsa da HER ZAMAN calisir)
+        int calibratedScore = calibrateScore(response.riskScore(), groundedRisks);
         return new AuditResponse(calibratedScore, response.scoreRationale(), response.summary(),
-                response.risks(), response.recommendations(), response.keyMetrics(),
+                groundedRisks, response.recommendations(), response.keyMetrics(),
                 response.advisorQuestions(), references);
+    }
+
+    private static final Pattern PAGE_MARKER = Pattern.compile("\\[REPORT PAGE (\\d+)\\]");
+    // "(Rapor Sayfa 8)", "(Sayfa 5, 11)", "(Page 10)" gibi parantezli sayfa atiflarini yakalar
+    private static final Pattern PAGE_PAREN =
+            Pattern.compile("\\((?:Rapor\\s+)?(?:Sayfa|Report\\s+Page|Page)\\s+[0-9,\\s-]+\\)", Pattern.CASE_INSENSITIVE);
+    // Ayirt edici sayisal cipalar: 18.205,5 / 500.000.000 / 44,8 / %51,3
+    // Duz tam sayilar (2026, 5G) eslesmez; yil ve etiket gurultusu boylece dislanir
+    private static final Pattern NUMBER_ANCHOR =
+            Pattern.compile("%?\\d{1,3}(?:\\.\\d{3})+(?:,\\d+)?|%?\\d+,\\d+");
+
+    private Map<Integer, String> splitPages(String documentText) {
+        Map<Integer, String> pages = new LinkedHashMap<>();
+        if (documentText == null) {
+            return pages;
+        }
+        Matcher m = PAGE_MARKER.matcher(documentText);
+        int lastPage = -1, lastEnd = 0;
+        while (m.find()) {
+            if (lastPage >= 0) {
+                pages.put(lastPage, documentText.substring(lastEnd, m.start()));
+            }
+            lastPage = Integer.parseInt(m.group(1));
+            lastEnd = m.end();
+        }
+        if (lastPage >= 0) {
+            pages.put(lastPage, documentText.substring(lastEnd));
+        }
+        return pages;
+    }
+
+    private List<Integer> groundPages(String evidence, Map<Integer, String> pages) {
+        if (evidence == null || pages.isEmpty()) {
+            return List.of();
+        }
+        // Parantezli sayfa atfini cipa aramasindan dislayalim ki "(Sayfa 5, 11)" icindeki
+        // sayilar cipa sanilmasin
+        String searchable = PAGE_PAREN.matcher(evidence).replaceAll(" ");
+        Matcher m = NUMBER_ANCHOR.matcher(searchable);
+        Set<String> anchors = new LinkedHashSet<>();
+        while (m.find()) {
+            anchors.add(m.group());
+        }
+        // Her cipanin gectigi sayfalar; tek sayfada gecen cipalar guclu oy sayilir.
+        // Sinir kontrolu: "44,8" cipasi "144,8" veya "44,85" icinde eslesmesin
+        SortedSet<Integer> strong = new TreeSet<>();
+        Map<Integer, Integer> votes = new HashMap<>();
+        for (String anchor : anchors) {
+            Pattern bounded = Pattern.compile("(?<![\\d.,])" + Pattern.quote(anchor) + "(?![\\d])");
+            List<Integer> hits = new ArrayList<>();
+            for (Map.Entry<Integer, String> page : pages.entrySet()) {
+                if (bounded.matcher(page.getValue()).find()) {
+                    hits.add(page.getKey());
+                }
+            }
+            if (hits.size() == 1) {
+                strong.add(hits.get(0));
+            }
+            for (Integer hit : hits) {
+                votes.merge(hit, 1, Integer::sum);
+            }
+        }
+        if (!strong.isEmpty()) {
+            return List.copyOf(strong);
+        }
+        // Tum cipalar birden fazla sayfada geciyorsa en cok oyu alan sayfayi sec
+        return votes.entrySet().stream()
+                .max(Map.Entry.<Integer, Integer>comparingByValue()
+                        .thenComparing(Map.Entry.comparingByKey(Comparator.reverseOrder())))
+                .map(e -> List.of(e.getKey()))
+                .orElse(List.of());
     }
 
     // skor, bulgu siddet dagilimiyla ayni bantta kalsin
