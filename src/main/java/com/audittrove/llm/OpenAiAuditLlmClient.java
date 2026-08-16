@@ -27,7 +27,14 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             no findings above LOW -> 0-20; only MEDIUM findings -> 21-45 scaled by count and materiality;
             at least one HIGH finding -> 46-70; any CRITICAL finding, or multiple HIGH findings with
             liquidity or going-concern signals -> 71-100. The score must always be consistent with
-            the severity distribution of the findings you report. Findings must be concise,
+            the severity distribution of the findings you report.
+            Consistency rules: if the document reports the same line items under multiple accounting
+            standards (e.g. TMS and IFRS tables), pick ONE standard, use it for every figure in your
+            entire output, and mention which standard you used in the summary. The summary,
+            scoreRationale and findings must never contradict each other. A finding title must match
+            the direction of its evidence: an improving figure (e.g. expenses or losses decreasing)
+            must never be titled as a deterioration; report improvements as LOW severity observations
+            or omit them. Findings must be concise,
             evidence-based, and written in English. Every finding must cite the supplied REPORT PAGE marker.
             scoreRationale: one sentence explaining what drove the risk score, naming the main positive and negative signals.
             keyMetrics: 3 to 5 headline figures from the document (e.g. revenue, EBITDA margin, net profit, cash) with label, value exactly as written in the document, and a short note (empty string if none). Only include figures explicitly present in the document.
@@ -106,9 +113,29 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                     .map(chunk -> new AuditResponse.Reference(chunk.source(), chunk.article(), chunk.title()))
                     .toList();
         }
-        return new AuditResponse(response.riskScore(), response.scoreRationale(), response.summary(),
+        int calibratedScore = calibrateScore(response.riskScore(), response.risks());
+        return new AuditResponse(calibratedScore, response.scoreRationale(), response.summary(),
                 response.risks(), response.recommendations(), response.keyMetrics(),
                 response.advisorQuestions(), references);
+    }
+
+    // skor, bulgu siddet dagilimiyla ayni bantta kalsin
+    private int calibrateScore(int score, List<AuditResponse.Risk> risks) {
+        boolean critical = false, high = false, medium = false;
+        if (risks != null) {
+            for (AuditResponse.Risk r : risks) {
+                String sev = r.severity() == null ? "" : r.severity();
+                if ("CRITICAL".equals(sev)) critical = true;
+                else if ("HIGH".equals(sev)) high = true;
+                else if ("MEDIUM".equals(sev)) medium = true;
+            }
+        }
+        int min, max;
+        if (critical) { min = 71; max = 100; }
+        else if (high) { min = 46; max = 70; }
+        else if (medium) { min = 21; max = 45; }
+        else { min = 0; max = 20; }
+        return Math.max(min, Math.min(max, score));
     }
 
     private String languageInstruction(String language) {
