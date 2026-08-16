@@ -30,12 +30,20 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             the severity distribution of the findings you report.
             Consistency rules: if the document reports the same line items under multiple accounting
             standards (e.g. TMS and IFRS tables), pick ONE standard, use it for every figure in your
-            entire output, and mention which standard you used in the summary. The summary,
+            entire output, and mention which standard you used in the summary. This is a hard lock:
+            once chosen, NEVER take any figure from the other standard's table, even when the same
+            line item (e.g. finance expenses) appears there with a different scope or a more dramatic
+            change. If a line item's value or direction differs between the two standards, you must
+            use the chosen standard's value and direction; a change that exists only under the other
+            standard must not be reported as a finding. The summary,
             scoreRationale and findings must never contradict each other. A finding title must match
             the direction of its evidence: an improving figure (e.g. expenses or losses decreasing)
             must never be titled as a deterioration; report improvements as LOW severity observations
             or omit them. Findings must be concise,
-            evidence-based, and written in English. Every finding must cite the supplied REPORT PAGE marker.
+            evidence-based, and written in English. Every finding must cite the page it comes from
+            using ONLY the number inside the nearest preceding [REPORT PAGE n] marker in the supplied
+            text. NEVER use printed page numbers, footer numbers, section numbers or table numbers
+            that appear inside the document body; they do not match the real page positions.
             scoreRationale: one sentence explaining what drove the risk score, naming the main positive and negative signals.
             keyMetrics: 3 to 5 headline figures from the document (e.g. revenue, EBITDA margin, net profit, cash) with label, value exactly as written in the document, and a short note (empty string if none). Only include figures explicitly present in the document.
             advisorQuestions: 3 short questions the reader should ask their financial advisor or the company, derived from the findings.
