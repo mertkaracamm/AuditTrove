@@ -41,9 +41,25 @@ public class MobileAuthFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !(tokenService.isEnabled()
-                && "POST".equalsIgnoreCase(request.getMethod())
-                && "/api/v1/audit".equals(request.getRequestURI()));
+        if (!tokenService.isEnabled()) {
+            return true;
+        }
+        String uri = request.getRequestURI();
+        String method = request.getMethod();
+        // Is baslatma: senkron /audit + async /audit/async (tam koruma: token+rate+kota)
+        boolean submit = "POST".equalsIgnoreCase(method)
+                && ("/api/v1/audit".equals(uri) || "/api/v1/audit/async".equals(uri));
+        // Async durum sorgusu: sadece token dogrulanir (polling rate-limit'e takilmasin diye)
+        boolean statusQuery = "GET".equalsIgnoreCase(method)
+                && uri != null && uri.startsWith("/api/v1/audit/jobs/");
+        return !(submit || statusQuery);
+    }
+
+    /** Durum sorgusu mu? Oyleyse rate limit ve kota kapisi atlanir, yalnizca token dogrulanir. */
+    private boolean isStatusQuery(HttpServletRequest request) {
+        return "GET".equalsIgnoreCase(request.getMethod())
+                && request.getRequestURI() != null
+                && request.getRequestURI().startsWith("/api/v1/audit/jobs/");
     }
 
     @Override
@@ -59,6 +75,13 @@ public class MobileAuthFilter extends OncePerRequestFilter {
         if (deviceId.isEmpty()) {
             reject(response, HttpServletResponse.SC_UNAUTHORIZED,
                     "Geçersiz veya eksik erişim token'ı.");
+            return;
+        }
+
+        // Durum sorgusunda (polling) rate limit ve kota kapisi ATLANIR; sadece sahiplik icin deviceId gerekir.
+        if (isStatusQuery(request)) {
+            request.setAttribute(DEVICE_ID_ATTR, deviceId.get());
+            chain.doFilter(request, response);
             return;
         }
 
