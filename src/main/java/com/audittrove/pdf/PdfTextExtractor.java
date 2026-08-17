@@ -11,9 +11,10 @@ import java.io.IOException;
 @Component
 public class PdfTextExtractor {
 
-    // Cok asiri belgelerde bellek/sure korumasi icin ust tavan (~1M karakter).
-    // Normal yillik raporlar bunun cok altinda; chunking bu metni parcalara boler.
-    private static final int HARD_CAP_CHARS = 1_000_000;
+    // Cok asiri belgelerde bellek/sure korumasi icin ust tavan (~3M karakter, ~450 sayfa).
+    // Async akista sure baskisi olmadigindan tavan yuksek; chunking metni parcalara boler.
+    // Bu tavani asan belgelerde truncated=true olur ve ozet notu dogru sekilde kismi inceleme der.
+    private static final int HARD_CAP_CHARS = 3_000_000;
 
     /** Metin cikarma sonucu. truncated yalnizca HARD_CAP asilirsa true olur (cok nadir). */
     public record ExtractResult(String text, int totalPages, int includedPages, boolean truncated) {}

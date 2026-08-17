@@ -157,7 +157,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         // Belge tek bir cagriya sigmiyorsa parcalara bolup birlestir (chunking).
         List<String> chunks = splitIntoChunks(documentText);
         if (chunks.size() > 1) {
-            return auditChunked(chunks, context, language, documentType, totalPages);
+            return auditChunked(chunks, context, language, documentType, totalPages, includedPages, truncated);
         }
         AuditResponse single = auditSingle(documentText, context, language, documentType);
         return postProcess(single, context, documentText, language, false, totalPages, includedPages);
@@ -201,7 +201,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // Uzun belge: her parcayi ayri degerlendir, bulgu/gosterge/sorulari birlestir,
     // ozeti tum parca ozetlerinden sentezle. Sayfa dogrulama tum belge metnine karsi yapilir.
     private AuditResponse auditChunked(List<String> chunks, List<RegulationChunk> context,
-                                       String language, String documentType, int totalPages) {
+                                       String language, String documentType, int totalPages,
+                                       int includedPages, boolean truncated) {
         List<AuditResponse.Risk> allRisks = new ArrayList<>();
         List<String> allRecommendations = new ArrayList<>();
         List<AuditResponse.KeyMetric> allMetrics = new ArrayList<>();
@@ -237,13 +238,23 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         String fullText = String.join("", chunks);
         AuditResponse processed = postProcess(merged, context, fullText, language, false, totalPages, totalPages);
 
-        // Cok parcali oldugunu ozete deterministik olarak not dus
+        // Cok parcali oldugunu ozete deterministik olarak not dus.
+        // Belge tavani astiysa (truncated) "butunuyle" DEME — dogru sekilde kismi inceleme belirt.
         boolean turkish = "tr".equalsIgnoreCase(language);
-        String note = turkish
-            ? "Not: " + totalPages + " sayfalık belge " + chunks.size()
-                + " bölüme ayrılarak bütünüyle incelenmiştir. "
-            : "Note: This " + totalPages + "-page document was reviewed in full across " + chunks.size()
-                + " sections. ";
+        String note;
+        if (truncated) {
+            note = turkish
+                ? "Not: " + totalPages + " sayfalık belgenin ilk " + includedPages + " sayfası "
+                    + chunks.size() + " bölüme ayrılarak incelenmiştir; kalan sayfalar bu incelemeye dâhil değildir. "
+                : "Note: The first " + includedPages + " of " + totalPages + " pages were reviewed across "
+                    + chunks.size() + " sections; the remaining pages are not included. ";
+        } else {
+            note = turkish
+                ? "Not: " + totalPages + " sayfalık belge " + chunks.size()
+                    + " bölüme ayrılarak bütünüyle incelenmiştir. "
+                : "Note: This " + totalPages + "-page document was reviewed in full across " + chunks.size()
+                    + " sections. ";
+        }
         return new AuditResponse(processed.riskScore(), processed.scoreRationale(),
                 note + (processed.summary() == null ? "" : processed.summary()),
                 processed.risks(), processed.recommendations(), processed.keyMetrics(),
