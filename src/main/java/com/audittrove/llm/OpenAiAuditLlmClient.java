@@ -408,9 +408,48 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
         // 3) Skor kelepcesi (RAG bos olsa da HER ZAMAN calisir)
         int calibratedScore = calibrateScore(response.riskScore(), groundedRisks);
-        return new AuditResponse(calibratedScore, response.scoreRationale(), response.summary(),
-                groundedRisks, response.recommendations(), response.keyMetrics(),
-                response.advisorQuestions(), references);
+
+        // Standart kilidini ozet ve sorulara da uygula: yasakli capayi ( or. %74,7 / 11.678,7)
+        // iceren cumleyi ozetten cikar, o rakami iceren danisman sorusunu ele.
+        String summary = response.summary();
+        List<String> questions = response.advisorQuestions();
+        if (lock != null) {
+            summary = lock.scrubSummary(summary);
+            questions = questions == null ? null : questions.stream()
+                    .filter(q -> !lock.violatesLock(q))
+                    .toList();
+        }
+
+        // keyMetrics: parantezli ham tablo verisi ("(2.609,7) (2.917,3) %11,8") deger olarak
+        // sizmissa temizle — kullaniciya okunur tek deger kalsin.
+        List<AuditResponse.KeyMetric> cleanMetrics = response.keyMetrics() == null ? null :
+                response.keyMetrics().stream()
+                        .map(this::cleanMetric)
+                        .toList();
+
+        return new AuditResponse(calibratedScore, response.scoreRationale(), summary,
+                groundedRisks, response.recommendations(), cleanMetrics,
+                questions, references);
+    }
+
+    // Parantezli karsilastirma serisini ("(2.609,7) (2.917,3) %11,8") tek okunur degere indir:
+    // birden fazla parantezli tutar varsa sonuncusunu (guncel donem) al.
+    private AuditResponse.KeyMetric cleanMetric(AuditResponse.KeyMetric m) {
+        if (m == null || m.value() == null) return m;
+        String v = m.value().trim();
+        // "(2.609,7) (2.917,3) %11,8" gibi coklu parantez + yuzde deseni
+        Matcher paren = Pattern.compile("\\(([\\d.,]+)\\)").matcher(v);
+        List<String> nums = new ArrayList<>();
+        while (paren.find()) nums.add(paren.group(1));
+        if (nums.size() >= 2) {
+            // Guncel donem = son parantez; varsa yuzdeyi de ekle
+            Matcher pct = Pattern.compile("%\\s?[\\d.,]+").matcher(v);
+            String pctStr = "";
+            while (pct.find()) pctStr = pct.group();
+            String cleaned = nums.get(nums.size() - 1) + (pctStr.isEmpty() ? "" : " (" + pctStr + ")");
+            return new AuditResponse.KeyMetric(m.label(), cleaned, m.note());
+        }
+        return m;
     }
 
     // ---- Standart kilidi (deterministik) ----
@@ -430,6 +469,25 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 }
             }
             return false;
+        }
+
+        // Ozetten, yasakli capayi iceren cumleleri cikarir. Cumlelere ayirir, her cumleyi
+        // kilit ihlaline gore filtreler, kalanlari birlestirir. Boylece "TMS sectim" deyip
+        // ozette UFRS rakami (%74,7 / 11.678,7) geciren cumle silinir.
+        String scrubSummary(String summary) {
+            if (summary == null || summary.isBlank() || foreignOnlyAnchors.isEmpty()) {
+                return summary;
+            }
+            String[] sentences = summary.split("(?<=[.!?])\\s+");
+            StringBuilder kept = new StringBuilder();
+            for (String s : sentences) {
+                if (!violatesLock(s)) {
+                    if (kept.length() > 0) kept.append(" ");
+                    kept.append(s.trim());
+                }
+            }
+            String result = kept.toString().trim();
+            return result.isEmpty() ? summary : result;
         }
     }
 
