@@ -42,6 +42,14 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             using ONLY the number inside the nearest preceding [REPORT PAGE n] marker in the supplied
             text. NEVER use printed page numbers, footer numbers, section numbers or table numbers
             that appear inside the document body; they do not match the real page positions.
+            OCR-derived text: the document may come from a phone scan and contain OCR artifacts
+            (e.g. '!' in place of 'i', '#' or similar symbols wrapped around numbers, broken or
+            merged words). Treat artifacts as noise, not content. For every amount, cross-check the
+            numeral against any spelled-out amount in the text (e.g. a numeral next to words like
+            "Besyuz" / "five hundred"); when they conflict, use the spelled-out amount and mention
+            the discrepancy in the evidence. Never copy OCR artifacts into titles, keyMetrics labels
+            or values. If a figure or date cannot be read reliably, omit it or state that it could
+            not be read reliably instead of guessing a value.
             scoreRationale: one sentence explaining what drove the risk score, naming the main positive and negative signals.
             keyMetrics: 3 to 5 key facts from the document (amounts, dates, durations, rates) with label,
             value exactly as written in the document, and a short note (empty string if none). Only include
@@ -237,6 +245,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // Duz tam sayilar (2026, 5G) eslesmez; yil ve etiket gurultusu boylece dislanir
     private static final Pattern NUMBER_ANCHOR =
             Pattern.compile("%?\\d{1,3}(?:\\.\\d{3})+(?:,\\d+)?|%?\\d+,\\d+");
+    // Taranmis belgelerdeki duz tutarlar (1300, 2600) icin: 3+ haneli tam sayilar, yillar haric
+    private static final Pattern PLAIN_INT_ANCHOR =
+            Pattern.compile("(?<![\\d.,])\\d{3,}(?![\\d.,])");
+    private static final Pattern YEAR_LIKE = Pattern.compile("(?:19|20)\\d{2}");
 
     private Map<Integer, String> splitPages(String documentText) {
         Map<Integer, String> pages = new LinkedHashMap<>();
@@ -269,6 +281,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         Set<String> anchors = new LinkedHashSet<>();
         while (m.find()) {
             anchors.add(m.group());
+        }
+        Matcher plain = PLAIN_INT_ANCHOR.matcher(searchable);
+        while (plain.find()) {
+            String token = plain.group();
+            if (!YEAR_LIKE.matcher(token).matches()) {
+                anchors.add(token);
+            }
         }
         // Her cipanin gectigi sayfalar; tek sayfada gecen cipalar guclu oy sayilir.
         // Sinir kontrolu: "44,8" cipasi "144,8" veya "44,85" icinde eslesmesin
