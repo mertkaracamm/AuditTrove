@@ -63,18 +63,10 @@ public class AuditJobService {
                 return;
             }
             boolean turkish = !"en".equalsIgnoreCase(job.language());
-            String name = job.fileName();
+            // Dosya adi push metninde KULLANILMIYOR: multipart'tan gelen ad Turkce karakterlerde
+            // bozuk/percent-encoded olabiliyor (or. "%C3%87"). Genel, encoding-guvenli mesaj veriyoruz.
             String title = turkish ? "İncelemeniz hazır" : "Your review is ready";
-            String body;
-            if (turkish) {
-                body = (name != null && !name.isBlank())
-                        ? name + " için raporunuz hazır."
-                        : "Raporunuz görüntülenmeye hazır.";
-            } else {
-                body = (name != null && !name.isBlank())
-                        ? "Your report for " + name + " is ready."
-                        : "Your report is ready to view.";
-            }
+            String body = turkish ? "Raporunuz görüntülenmeye hazır." : "Your report is ready to view.";
             expoPushClient.send(token, title, body);
         } catch (Exception e) {
             log.warn("Push bildirimi gonderilemedi (job {}): {}", job.id(), e.getMessage());

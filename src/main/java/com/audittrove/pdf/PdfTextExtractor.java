@@ -3,6 +3,7 @@ package com.audittrove.pdf;
 import com.audittrove.audit.InvalidDocumentException;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.pdmodel.encryption.InvalidPasswordException;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.springframework.stereotype.Component;
 
@@ -24,10 +25,18 @@ public class PdfTextExtractor {
     }
 
     public ExtractResult extractDetailed(byte[] content) throws IOException {
-        try (PDDocument document = Loader.loadPDF(content)) {
-            if (document.isEncrypted()) {
-                throw new InvalidDocumentException("Şifreli PDF dosyaları desteklenmiyor");
-            }
+        PDDocument document;
+        try {
+            document = Loader.loadPDF(content);
+        } catch (InvalidPasswordException e) {
+            // Yalnizca ACILIS parolasi (user-password) olan PDF'ler burada patlar.
+            throw new InvalidDocumentException("Açılış parolası olan PDF dosyaları desteklenmiyor", e);
+        }
+        try (document) {
+            // Owner-password'lu (acilabilen ama kopyalama/yazdirma kisitli) belgeler resmi
+            // evraklarda yaygin — bunlardan metin cikarilabilir. Guvenlik bayraklarini kaldirip
+            // metin cikarmayi garanti ediyoruz; isEncrypted reddi kaldirildi.
+            document.setAllSecurityToBeRemoved(true);
             int total = document.getNumberOfPages();
             StringBuilder sb = new StringBuilder();
             int included = 0;
