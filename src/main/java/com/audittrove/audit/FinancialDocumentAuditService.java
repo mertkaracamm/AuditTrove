@@ -59,10 +59,11 @@ public class FinancialDocumentAuditService {
     public AuditResponse audit(String filename, byte[] content, String language, String documentType) {
         validate(filename, content);
         try {
-            String text = pdfTextExtractor.extract(content);
+            PdfTextExtractor.ExtractResult extracted = pdfTextExtractor.extractDetailed(content);
             // Belgeler kendi iceriklerine gore degerlendirilir; RAG korpusu aktif degil.
             List<RegulationChunk> context = List.of();
-            return llmClient.audit(text, context, language, documentType);
+            return llmClient.audit(extracted.text(), context, language, documentType,
+                    extracted.truncated(), extracted.totalPages(), extracted.includedPages());
         } catch (IOException exception) {
             throw new InvalidDocumentException("PDF okunamadı", exception);
         }

@@ -149,10 +149,23 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     }
 
     @Override
-    public AuditResponse audit(String documentText, List<RegulationChunk> context, String language, String documentType) {
+    public AuditResponse audit(String documentText, List<RegulationChunk> context, String language, String documentType,
+                               boolean truncated, int totalPages, int includedPages) {
         if (apiKey.isBlank()) {
             throw new LlmUnavailableException("OPENAI_API_KEY yapılandırılmamış");
         }
+        // Belge tek bir cagriya sigmiyorsa parcalara bolup birlestir (chunking).
+        List<String> chunks = splitIntoChunks(documentText);
+        if (chunks.size() > 1) {
+            return auditChunked(chunks, context, language, documentType, totalPages);
+        }
+        AuditResponse single = auditSingle(documentText, context, language, documentType);
+        return postProcess(single, context, documentText, language, false, totalPages, includedPages);
+    }
+
+    // Tek bir metin blogunu tek LLM cagrisiyla degerlendirir (post-process yapmaz).
+    private AuditResponse auditSingle(String documentText, List<RegulationChunk> context,
+                                      String language, String documentType) {
         Map<String, Object> body = Map.of(
                 "model", model,
                 "temperature", 0.1,
@@ -177,8 +190,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             if (content.isBlank()) {
                 throw new LlmUnavailableException("LLM boş yanıt döndürdü");
             }
-            AuditResponse responseBody = objectMapper.readValue(content, AuditResponse.class);
-            return postProcess(responseBody, context, documentText, language);
+            return objectMapper.readValue(content, AuditResponse.class);
         } catch (LlmUnavailableException exception) {
             throw exception;
         } catch (Exception exception) {
@@ -186,8 +198,161 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
     }
 
+    // Uzun belge: her parcayi ayri degerlendir, bulgu/gosterge/sorulari birlestir,
+    // ozeti tum parca ozetlerinden sentezle. Sayfa dogrulama tum belge metnine karsi yapilir.
+    private AuditResponse auditChunked(List<String> chunks, List<RegulationChunk> context,
+                                       String language, String documentType, int totalPages) {
+        List<AuditResponse.Risk> allRisks = new ArrayList<>();
+        List<String> allRecommendations = new ArrayList<>();
+        List<AuditResponse.KeyMetric> allMetrics = new ArrayList<>();
+        List<String> allQuestions = new ArrayList<>();
+        List<String> partialSummaries = new ArrayList<>();
+        int maxScore = 0;
+
+        for (String chunk : chunks) {
+            AuditResponse part = auditSingle(chunk, context, language, documentType);
+            if (part.risks() != null) allRisks.addAll(part.risks());
+            if (part.recommendations() != null) allRecommendations.addAll(part.recommendations());
+            if (part.keyMetrics() != null) allMetrics.addAll(part.keyMetrics());
+            if (part.advisorQuestions() != null) allQuestions.addAll(part.advisorQuestions());
+            if (part.summary() != null && !part.summary().isBlank()) partialSummaries.add(part.summary());
+            maxScore = Math.max(maxScore, part.riskScore());
+        }
+
+        // En onemli bulgulari one al, makul sayida tut (sinyal seyrelmesini onle)
+        allRisks.sort(Comparator.comparingInt((AuditResponse.Risk r) -> severityRank(r.severity())).reversed());
+        List<AuditResponse.Risk> mergedRisks = dedupeRisks(allRisks, 8);
+        List<AuditResponse.KeyMetric> mergedMetrics = allMetrics.stream().limit(6).toList();
+        List<String> mergedRecs = allRecommendations.stream().distinct().limit(6).toList();
+        List<String> mergedQuestions = allQuestions.stream().distinct().limit(4).toList();
+
+        // Ozeti parca ozetlerinden tek bir sentez cagrisiyla topla
+        String summary = synthesizeSummary(partialSummaries, language, documentType);
+        String rationale = synthesizeRationale(mergedRisks, language);
+
+        AuditResponse merged = new AuditResponse(maxScore, rationale, summary,
+                mergedRisks, mergedRecs, mergedMetrics, mergedQuestions, List.of());
+
+        // Butun belge metnini birlestirip sayfa dogrulama + skor kelepcesi + standart kilidini uygula
+        String fullText = String.join("", chunks);
+        AuditResponse processed = postProcess(merged, context, fullText, language, false, totalPages, totalPages);
+
+        // Cok parcali oldugunu ozete deterministik olarak not dus
+        boolean turkish = "tr".equalsIgnoreCase(language);
+        String note = turkish
+            ? "Not: " + totalPages + " sayfalık belge " + chunks.size()
+                + " bölüme ayrılarak bütünüyle incelenmiştir. "
+            : "Note: This " + totalPages + "-page document was reviewed in full across " + chunks.size()
+                + " sections. ";
+        return new AuditResponse(processed.riskScore(), processed.scoreRationale(),
+                note + (processed.summary() == null ? "" : processed.summary()),
+                processed.risks(), processed.recommendations(), processed.keyMetrics(),
+                processed.advisorQuestions(), processed.references());
+    }
+
+    // Belgeyi [REPORT PAGE n] sinirlarinda, ~CHUNK_CHARS'lik parcalara boler.
+    private static final int CHUNK_CHARS = 110_000;
+
+    private List<String> splitIntoChunks(String documentText) {
+        List<String> chunks = new ArrayList<>();
+        if (documentText == null || documentText.length() <= CHUNK_CHARS) {
+            chunks.add(documentText == null ? "" : documentText);
+            return chunks;
+        }
+        Matcher m = PAGE_MARKER.matcher(documentText);
+        List<Integer> pageStarts = new ArrayList<>();
+        while (m.find()) {
+            pageStarts.add(m.start());
+        }
+        if (pageStarts.size() <= 1) {
+            // Sayfa isaretci yoksa ham karakter bazli bol
+            for (int i = 0; i < documentText.length(); i += CHUNK_CHARS) {
+                chunks.add(documentText.substring(i, Math.min(documentText.length(), i + CHUNK_CHARS)));
+            }
+            return chunks;
+        }
+        int chunkStart = 0;
+        for (int i = 0; i < pageStarts.size(); i++) {
+            int pageStart = pageStarts.get(i);
+            int nextPageEnd = (i + 1 < pageStarts.size()) ? pageStarts.get(i + 1) : documentText.length();
+            if (nextPageEnd - chunkStart > CHUNK_CHARS && pageStart > chunkStart) {
+                chunks.add(documentText.substring(chunkStart, pageStart));
+                chunkStart = pageStart;
+            }
+        }
+        chunks.add(documentText.substring(chunkStart));
+        return chunks;
+    }
+
+    private int severityRank(String severity) {
+        if (severity == null) return 0;
+        return switch (severity.toUpperCase()) {
+            case "CRITICAL" -> 4;
+            case "HIGH" -> 3;
+            case "MEDIUM" -> 2;
+            case "LOW" -> 1;
+            default -> 0;
+        };
+    }
+
+    // Ayni basligi tekrar eden bulgulari (parcalar arasi cakisma) ele, en fazla 'limit' tut
+    private List<AuditResponse.Risk> dedupeRisks(List<AuditResponse.Risk> risks, int limit) {
+        List<AuditResponse.Risk> out = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (AuditResponse.Risk r : risks) {
+            String key = r.title() == null ? "" : r.title().trim().toLowerCase();
+            if (seen.add(key)) {
+                out.add(r);
+                if (out.size() >= limit) break;
+            }
+        }
+        return out;
+    }
+
+    private String synthesizeSummary(List<String> partialSummaries, String language, String documentType) {
+        if (partialSummaries.isEmpty()) return "";
+        if (partialSummaries.size() == 1) return partialSummaries.get(0);
+        boolean turkish = "tr".equalsIgnoreCase(language);
+        String instruction = turkish
+            ? "Aşağıda bir belgenin farklı bölümlerine ait özetler var. Bunları TEK, tutarlı bir yönetici özetinde birleştir. Yalnızca özet metnini döndür, başka bir şey ekleme."
+            : "Below are summaries of different sections of one document. Merge them into ONE coherent executive summary. Return only the summary text, nothing else.";
+        String joined = String.join("\n---\n", partialSummaries);
+        try {
+            Map<String, Object> body = Map.of(
+                    "model", model,
+                    "temperature", 0.2,
+                    "messages", List.of(
+                            Map.of("role", "system", "content", instruction),
+                            Map.of("role", "user", "content", joined)));
+            JsonNode response = restClient.post()
+                    .uri("/v1/chat/completions")
+                    .header("Authorization", "Bearer " + apiKey)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve()
+                    .body(JsonNode.class);
+            String content = response.at("/choices/0/message/content").asText();
+            return content.isBlank() ? partialSummaries.get(0) : content.trim();
+        } catch (Exception e) {
+            // Sentez cagrisi basarisizsa ilk parcanin ozetiyle yetiN (guvenli geri donus)
+            return partialSummaries.get(0);
+        }
+    }
+
+    private String synthesizeRationale(List<AuditResponse.Risk> risks, String language) {
+        boolean turkish = "tr".equalsIgnoreCase(language);
+        long high = risks.stream().filter(r -> severityRank(r.severity()) >= 3).count();
+        long mid = risks.stream().filter(r -> severityRank(r.severity()) == 2).count();
+        if (turkish) {
+            return "Belge genelinde " + high + " yüksek ve " + mid
+                    + " orta önem düzeyinde dikkat noktası tespit edilmiştir.";
+        }
+        return high + " high and " + mid + " medium severity attention points were identified across the document.";
+    }
+
     private AuditResponse postProcess(AuditResponse response, List<RegulationChunk> context,
-                                      String documentText, String language) {
+                                      String documentText, String language,
+                                      boolean truncated, int totalPages, int includedPages) {
         // 1) Mevzuat referansları (yalnizca RAG baglami varsa filtrele/uret)
         List<AuditResponse.Reference> references = response.references();
         if (!context.isEmpty()) {
@@ -206,9 +371,15 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         Map<Integer, String> pages = splitPages(documentText);
         boolean turkish = "tr".equalsIgnoreCase(language);
         String pageWord = turkish ? "Sayfa" : "Page";
+        // Standart kilidi (deterministik): ozet hangi standardi sectiyse, sadece diger
+        // standardin bolgesinde gecen rakamlari tasiyan bulgular elenir.
+        AccountingLock lock = buildAccountingLock(documentText, response.summary());
         SortedSet<Integer> allPages = new TreeSet<>();
         List<AuditResponse.Risk> groundedRisks = new ArrayList<>();
         for (AuditResponse.Risk risk : response.risks()) {
+            if (lock != null && lock.violatesLock(risk.evidence())) {
+                continue; // yanlis standarttan gelen bulgu — rapordan cikar
+            }
             List<Integer> found = groundPages(risk.evidence(), pages);
             if (found.isEmpty()) {
                 groundedRisks.add(risk); // rakam bulunamadi, modelin dedigini bozma
@@ -217,8 +388,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             allPages.addAll(found);
             String pageList = found.stream().map(String::valueOf).collect(Collectors.joining(", "));
             String replacement = "(" + pageWord + " " + pageList + ")";
-            String evidence = PAGE_PAREN.matcher(risk.evidence()).replaceAll(Matcher.quoteReplacement(replacement));
-            if (evidence.equals(risk.evidence()) && !evidence.contains(replacement)) {
+            // Once modelin sizdirdigi ciplak [REPORT PAGE n] isaretcilerini temizle,
+            // sonra parantezli atifi gercek sayfayla degistir. Boylece "[REPORT PAGE 11] (Sayfa 11)"
+            // gibi cift/ciplak referans kullaniciya gitmez.
+            String evidence = MARKER_IN_TEXT.matcher(risk.evidence()).replaceAll(" ");
+            evidence = evidence.replaceAll("\\s{2,}", " ").trim();
+            evidence = PAGE_PAREN.matcher(evidence).replaceAll(Matcher.quoteReplacement(replacement));
+            if (!evidence.contains(replacement)) {
                 evidence = evidence.stripTrailing() + " " + replacement;
             }
             groundedRisks.add(new AuditResponse.Risk(risk.title(), risk.severity(), risk.finding(), evidence));
@@ -237,7 +413,97 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 response.advisorQuestions(), references);
     }
 
+    // ---- Standart kilidi (deterministik) ----
+    // Belge iki muhasebe standardi (TMS ve UFRS/IFRS) altinda ayni kalemleri farkli
+    // degerlerle sunabilir. Ozet hangi standardi sectiyse, YALNIZCA diger standardin
+    // bolgesine ozgu rakamlari tasiyan bulgular elenir. Boylece "TMS sectim" deyip
+    // finansman giderini UFRS'ten alan (%74,7) bulgu deterministik olarak dusurulur.
+    private record AccountingLock(Set<String> foreignOnlyAnchors) {
+        boolean violatesLock(String evidence) {
+            if (evidence == null || foreignOnlyAnchors.isEmpty()) {
+                return false;
+            }
+            String norm = evidence.replace(".", "").replace(" ", "");
+            for (String anchor : foreignOnlyAnchors) {
+                if (norm.contains(anchor)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    private static final Pattern STD_TMS = Pattern.compile("\\bTMS\\b", Pattern.CASE_INSENSITIVE);
+    private static final Pattern STD_IFRS = Pattern.compile("\\b(UFRS|IFRS)\\b", Pattern.CASE_INSENSITIVE);
+    // Bir standart tablosunun basladigi cumle ("... TMS ... uygun olarak hazirlanmis")
+    private static final Pattern TMS_HEADER =
+            Pattern.compile("(TMS)[^\\n]{0,80}(uygun|hazirlan|dayan)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern IFRS_HEADER =
+            Pattern.compile("(UFRS|IFRS)[^\\n]{0,80}(uygun|hazirlan|dayan)", Pattern.CASE_INSENSITIVE);
+    private static final Pattern MONEY_TOKEN =
+            Pattern.compile("\\d{1,3}(?:\\.\\d{3})+(?:,\\d+)?|\\d+,\\d+");
+
+    private AccountingLock buildAccountingLock(String documentText, String summary) {
+        if (documentText == null || summary == null) {
+            return null;
+        }
+        // Ozet hangi standardi soyluyor?
+        boolean summaryTms = STD_TMS.matcher(summary).find();
+        boolean summaryIfrs = STD_IFRS.matcher(summary).find();
+        if (summaryTms == summaryIfrs) {
+            return null; // ikisi de yok ya da ikisi de var — kilit uygulanamaz
+        }
+        // Belgeyi standart basliklarindan iki bolgeye ayir
+        Matcher tmsH = TMS_HEADER.matcher(documentText);
+        Matcher ifrsH = IFRS_HEADER.matcher(documentText);
+        if (!tmsH.find() || !ifrsH.find()) {
+            return null; // iki standart bolgesi net degilse dokunma
+        }
+        int tmsStart = tmsH.start();
+        int ifrsStart = ifrsH.start();
+        String chosenRegion, foreignRegion;
+        if (summaryTms) {
+            // Secilen TMS: bolgesi tmsStart..ifrsStart (TMS once geliyorsa), yabanci = UFRS sonrasi
+            chosenRegion = safeSub(documentText, tmsStart, ifrsStart > tmsStart ? ifrsStart : documentText.length());
+            foreignRegion = safeSub(documentText, ifrsStart, ifrsStart > tmsStart ? documentText.length() : tmsStart);
+        } else {
+            chosenRegion = safeSub(documentText, ifrsStart, tmsStart > ifrsStart ? tmsStart : documentText.length());
+            foreignRegion = safeSub(documentText, tmsStart, tmsStart > ifrsStart ? documentText.length() : ifrsStart);
+        }
+        // Yabanci bolgede olup secilen bolgede OLMAYAN para rakamlari = "yasakli capalar"
+        Set<String> chosen = moneyTokens(chosenRegion);
+        Set<String> foreignOnly = new LinkedHashSet<>();
+        for (String tok : moneyTokens(foreignRegion)) {
+            if (!chosen.contains(tok)) {
+                foreignOnly.add(tok);
+            }
+        }
+        return foreignOnly.isEmpty() ? null : new AccountingLock(foreignOnly);
+    }
+
+    private static String safeSub(String s, int a, int b) {
+        int lo = Math.max(0, Math.min(a, b));
+        int hi = Math.min(s.length(), Math.max(a, b));
+        return lo < hi ? s.substring(lo, hi) : "";
+    }
+
+    private Set<String> moneyTokens(String region) {
+        Set<String> out = new LinkedHashSet<>();
+        Matcher m = MONEY_TOKEN.matcher(region);
+        while (m.find()) {
+            String norm = m.group().replace(".", "").replace(" ", "");
+            // Sadece anlamli buyuklukteki tutarlar (kucuk oran/yuzde gurultusunu ele)
+            if (norm.replace(",", "").length() >= 4) {
+                out.add(norm);
+            }
+        }
+        return out;
+    }
+
     private static final Pattern PAGE_MARKER = Pattern.compile("\\[REPORT PAGE (\\d+)\\]");
+    // Kanit metnine sizan ciplak isaretci ("... yukselmistir [REPORT PAGE 11]") — kullaniciya gitmemeli
+    private static final Pattern MARKER_IN_TEXT =
+            Pattern.compile("\\s*\\[REPORT PAGE \\d+\\]\\s*", Pattern.CASE_INSENSITIVE);
     // "(Rapor Sayfa 8)", "(Sayfa 5, 11)", "(Page 10)" gibi parantezli sayfa atiflarini yakalar
     private static final Pattern PAGE_PAREN =
             Pattern.compile("\\((?:Rapor\\s+)?(?:Sayfa|Report\\s+Page|Page)\\s+[0-9,\\s-]+\\)", Pattern.CASE_INSENSITIVE);
