@@ -393,8 +393,24 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             }
             List<Integer> found = groundPages(risk.evidence(), pages);
             if (found.isEmpty()) {
-                groundedRisks.add(risk); // rakam bulunamadi, modelin dedigini bozma
-                continue;
+                // Rakamdan sayfa bulunamadi. Ama model kanit sonuna ciplak [REPORT PAGE n]
+                // birakmis olabilir (ozellikle rakamsiz metinlerde). O sayfayi kullan;
+                // yalnizca belgede GERCEKTEN var olan sayfalari kabul et (uydurma sayfayi ele).
+                Matcher pm = PAGE_MARKER.matcher(risk.evidence());
+                SortedSet<Integer> markerPages = new TreeSet<>();
+                while (pm.find()) {
+                    try { markerPages.add(Integer.parseInt(pm.group(1))); } catch (NumberFormatException ignore) {}
+                }
+                markerPages.retainAll(pages.keySet());
+                if (!markerPages.isEmpty()) {
+                    found = new ArrayList<>(markerPages);
+                } else {
+                    // Hic gecerli sayfa yok: ciplak isaretci kullaniciya SIZMASIN diye temizle
+                    String cleaned = MARKER_IN_TEXT.matcher(risk.evidence()).replaceAll(" ")
+                            .replaceAll("\\s{2,}", " ").trim();
+                    groundedRisks.add(new AuditResponse.Risk(risk.title(), risk.severity(), risk.finding(), cleaned));
+                    continue;
+                }
             }
             allPages.addAll(found);
             String pageList = found.stream().map(String::valueOf).collect(Collectors.joining(", "));
