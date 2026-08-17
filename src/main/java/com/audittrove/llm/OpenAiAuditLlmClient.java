@@ -500,6 +500,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             Pattern.compile("(UFRS|IFRS)[^\\n]{0,80}(uygun|hazirlan|dayan)", Pattern.CASE_INSENSITIVE);
     private static final Pattern MONEY_TOKEN =
             Pattern.compile("\\d{1,3}(?:\\.\\d{3})+(?:,\\d+)?|\\d+,\\d+");
+    // Yuzde capalari: "%74,7" gibi. Tutar filtresine (>=4 hane) takilmadan kilide girer,
+    // cunku ozet/soru cogu zaman UFRS tutarini (11.678,7) degil sadece yuzdesini (%74,7) tasir.
+    private static final Pattern PERCENT_TOKEN =
+            Pattern.compile("%\\s?\\d{1,3}(?:,\\d+)?");
 
     private AccountingLock buildAccountingLock(String documentText, String summary) {
         if (documentText == null || summary == null) {
@@ -536,6 +540,14 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 foreignOnly.add(tok);
             }
         }
+        // Yabanci bolgede olup secilen bolgede OLMAYAN yuzdeler de yasakli capa
+        // (or. UFRS finansman gideri %74,7 — TMS bolgesinde gecmiyorsa kilide girer).
+        Set<String> chosenPct = percentTokens(chosenRegion);
+        for (String tok : percentTokens(foreignRegion)) {
+            if (!chosenPct.contains(tok)) {
+                foreignOnly.add(tok);
+            }
+        }
         return foreignOnly.isEmpty() ? null : new AccountingLock(foreignOnly);
     }
 
@@ -554,6 +566,17 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             if (norm.replace(",", "").length() >= 4) {
                 out.add(norm);
             }
+        }
+        return out;
+    }
+
+    // Bolgedeki yuzde ifadelerini normalize edip dondurur ("%74,7", "%24,1").
+    // violatesLock evidence'i da bosluksuz/noktasiz karsilastirdigi icin capalar da bosluksuz.
+    private Set<String> percentTokens(String region) {
+        Set<String> out = new LinkedHashSet<>();
+        Matcher m = PERCENT_TOKEN.matcher(region);
+        while (m.find()) {
+            out.add(m.group().replace(" ", ""));
         }
         return out;
     }
