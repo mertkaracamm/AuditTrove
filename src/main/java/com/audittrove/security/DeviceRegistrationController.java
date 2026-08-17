@@ -2,6 +2,7 @@ package com.audittrove.security;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
@@ -20,9 +21,12 @@ import java.util.Map;
 public class DeviceRegistrationController {
 
     private final DeviceTokenService tokenService;
+    private final PushTokenStore pushTokenStore;
 
-    public DeviceRegistrationController(DeviceTokenService tokenService) {
+    public DeviceRegistrationController(DeviceTokenService tokenService,
+                                        PushTokenStore pushTokenStore) {
         this.tokenService = tokenService;
+        this.pushTokenStore = pushTokenStore;
     }
 
     public record DeviceRegistrationRequest(
@@ -41,5 +45,17 @@ public class DeviceRegistrationController {
                     .body(Map.of("error", "Cihaz kaydı şu anda yapılandırılmamış."));
         }
         return ResponseEntity.ok(Map.of("token", tokenService.issue(request.deviceId())));
+    }
+
+    // Cihazin Expo push token'ini kaydeder (auth'lu; deviceId token'dan cozulur).
+    @PostMapping("/devices/push-token")
+    @Operation(summary = "Cihazın push bildirimi token'ını kaydeder")
+    public ResponseEntity<Void> registerPushToken(@RequestBody Map<String, String> body,
+                                                  HttpServletRequest request) {
+        String deviceId = (String) request.getAttribute(MobileAuthFilter.DEVICE_ID_ATTR);
+        if (deviceId != null) {
+            pushTokenStore.put(deviceId, body.get("pushToken"));
+        }
+        return ResponseEntity.ok().build();
     }
 }

@@ -49,17 +49,24 @@ public class MobileAuthFilter extends OncePerRequestFilter {
         // Is baslatma: senkron /audit + async /audit/async (tam koruma: token+rate+kota)
         boolean submit = "POST".equalsIgnoreCase(method)
                 && ("/api/v1/audit".equals(uri) || "/api/v1/audit/async".equals(uri));
-        // Async durum sorgusu: sadece token dogrulanir (polling rate-limit'e takilmasin diye)
+        // Sadece token dogrulanan hafif yollar (rate-limit/kota YOK):
+        //  - async durum sorgusu (polling)
+        //  - push token kaydi
         boolean statusQuery = "GET".equalsIgnoreCase(method)
                 && uri != null && uri.startsWith("/api/v1/audit/jobs/");
-        return !(submit || statusQuery);
+        boolean pushToken = "POST".equalsIgnoreCase(method)
+                && "/api/v1/devices/push-token".equals(uri);
+        return !(submit || statusQuery || pushToken);
     }
 
-    /** Durum sorgusu mu? Oyleyse rate limit ve kota kapisi atlanir, yalnizca token dogrulanir. */
-    private boolean isStatusQuery(HttpServletRequest request) {
-        return "GET".equalsIgnoreCase(request.getMethod())
-                && request.getRequestURI() != null
-                && request.getRequestURI().startsWith("/api/v1/audit/jobs/");
+    /** Hafif yollar (durum sorgusu + push token kaydi): rate limit ve kota atlanir, yalnizca token dogrulanir. */
+    private boolean isTokenOnly(HttpServletRequest request) {
+        String uri = request.getRequestURI();
+        String method = request.getMethod();
+        if (uri == null) return false;
+        boolean statusQuery = "GET".equalsIgnoreCase(method) && uri.startsWith("/api/v1/audit/jobs/");
+        boolean pushToken = "POST".equalsIgnoreCase(method) && "/api/v1/devices/push-token".equals(uri);
+        return statusQuery || pushToken;
     }
 
     @Override
@@ -78,8 +85,9 @@ public class MobileAuthFilter extends OncePerRequestFilter {
             return;
         }
 
-        // Durum sorgusunda (polling) rate limit ve kota kapisi ATLANIR; sadece sahiplik icin deviceId gerekir.
-        if (isStatusQuery(request)) {
+        // Hafif yollarda (polling / push token kaydi) rate limit ve kota kapisi ATLANIR;
+        // sadece sahiplik icin deviceId gerekir.
+        if (isTokenOnly(request)) {
             request.setAttribute(DEVICE_ID_ATTR, deviceId.get());
             chain.doFilter(request, response);
             return;

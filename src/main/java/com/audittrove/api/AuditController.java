@@ -72,7 +72,7 @@ public class AuditController {
                 decisionObj instanceof QuotaService.Decision d ? d : null;
 
         String jobId = UUID.randomUUID().toString();
-        AuditJob job = new AuditJob(jobId, deviceId);
+        AuditJob job = new AuditJob(jobId, deviceId, file.getOriginalFilename(), language);
         jobStore.put(job);
 
         // Multipart istek cagri bitince kapanir; byte'lari SIMDI al, sonra async'e devret
