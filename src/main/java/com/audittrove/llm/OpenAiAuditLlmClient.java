@@ -55,6 +55,14 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             list it as a finding. A finding's title must match the direction of its evidence and must
             never frame a favorable item as a problem. It is correct to return few findings — or none —
             when the document is genuinely clean; do not pad the list with positive observations.
+            LANGUAGE INDEPENDENCE (critical): the SET of findings and each finding's severity are
+            determined ONLY by the document's contents — never by the output language. The exact same
+            document must produce the same findings, the same number of findings, and the same
+            severities whether the output language is Turkish or English. Language changes only the
+            wording of the text fields; it must never add, drop, split, merge, or re-rank findings.
+            Treat one underlying issue as exactly ONE finding: do not split a single issue (e.g. a cost
+            increase reported for both the quarter and the half-year) into multiple findings, and do not
+            create separate findings that restate the same concern.
             Findings must be concise and evidence-based. Every finding must cite the page it comes from
             using ONLY the number inside the nearest preceding [REPORT PAGE n] marker in the supplied
             text. NEVER use printed page numbers, footer numbers, section numbers or table numbers
@@ -149,6 +157,20 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                     came from (e.g. do not turn the other standard's "%41,0" into "%41" and present it as if it
                     were the chosen standard's number). Quote percentages exactly as they appear in the chosen
                     standard's table.
+                    Deterministic finding selection (financial): decide findings from the numbers, not
+                    from tone, so the same report always yields the same findings in any language. Create
+                    exactly ONE finding for each of these when present (MEDIUM unless it clearly signals
+                    going-concern/liquidity risk, then HIGH):
+                    (a) operating profit or net income down by roughly 20% or more year over year;
+                    (b) a major expense line (finance, marketing/selling, or general-admin) up by roughly
+                    20% or more year over year;
+                    (c) gross margin or EBITDA margin materially down; (d) a clear liquidity, leverage,
+                    going-concern, or receivable/customer-concentration concern stated in the document.
+                    ROUTINE financing and corporate actions are NOT findings on their own: issuing or
+                    redeeming bonds/commercial paper/sukuk/loans at market terms, dividend distributions,
+                    capital increases in subsidiaries, buybacks, or scheduled maturities. Mention them in
+                    the summary if relevant, but do NOT list them as findings unless the document states
+                    clearly adverse terms (e.g. distressed refinancing, covenant breach, punitive rates).
                     Multiple HIGH findings combined with liquidity or going-concern signals justify the
                     71-100 band even without a single CRITICAL finding.
                     """;
@@ -571,13 +593,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                     }
                 }
             }
-            // Yuzde capalari: token bazli + yuvarlama toleransli. Metindeki her yuzdeyi
-            // normalize edip ("%41,0" -> "%41") capa kumesiyle karsilastir. Boylece model
-            // ",0"'i atip "%41" yazsa bile yakalanir; ama "%41,8" (baska kalem) yakalanmaz.
+            // Yuzde capalari: DIL/FORMAT BAGIMSIZ. Metindeki her yuzdeyi kanonik sayiya
+            // cevirip ("%74,7", "74.7%", "%41,0", "41%" hepsi ayni degere iner) capa
+            // kumesiyle karsilastir. Boylece Ingilizce cikti (nokta ondalik, % arkada) da
+            // yakalanir; "%41,8" gibi farkli bir sayi yanlislikla eslesmez.
             if (!percentAnchors.isEmpty()) {
-                Matcher pm = PERCENT_TOKEN.matcher(evidence);
-                while (pm.find()) {
-                    if (percentAnchors.contains(normalizePercent(pm.group()))) {
+                for (String p : canonPercents(evidence)) {
+                    if (percentAnchors.contains(p)) {
                         return true;
                     }
                 }
@@ -622,10 +644,35 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             Pattern.compile("(UFRS|IFRS)[^\\n]{0,80}(uygun|hazirlan|dayan)", Pattern.CASE_INSENSITIVE);
     private static final Pattern MONEY_TOKEN =
             Pattern.compile("\\d{1,3}(?:\\.\\d{3})+(?:,\\d+)?|\\d+,\\d+");
-    // Yuzde capalari: "%74,7" gibi. Tutar filtresine (>=4 hane) takilmadan kilide girer,
-    // cunku ozet/soru cogu zaman UFRS tutarini (11.678,7) degil sadece yuzdesini (%74,7) tasir.
-    private static final Pattern PERCENT_TOKEN =
-            Pattern.compile("%\\s?\\d{1,3}(?:,\\d+)?");
+    // Yuzde: DIL/FORMAT BAGIMSIZ. % isareti ONDE ya da ARKADA, ondalik ayirici , ya da .
+    // olabilir: "%74,7", "74.7%", "%41,0", "41%". Hepsi kanonik sayiya cevrilip karsilastirilir.
+    private static final Pattern PERCENT_ANY =
+            Pattern.compile("%\\s?(\\d{1,3}(?:[.,]\\d+)?)|(\\d{1,3}(?:[.,]\\d+)?)\\s?%");
+
+    // Metindeki tum yuzdeleri kanonik sayi dizisine cevirir (or. "%74,7" ve "74.7%" -> "74.7").
+    private static java.util.Set<String> canonPercents(String s) {
+        java.util.Set<String> out = new LinkedHashSet<>();
+        if (s == null) return out;
+        Matcher m = PERCENT_ANY.matcher(s);
+        while (m.find()) {
+            String num = m.group(1) != null ? m.group(1) : m.group(2);
+            out.add(canonNum(num));
+        }
+        return out;
+    }
+
+    // Bir yuzde sayisini kanonik hale getirir: , ve . ikisi de ondalik sayilir;
+    // tam sayiya cok yakinsa tam say ("41,0"/"41.0"/"41" -> "41"), yoksa 1 ondalik ("74,7" -> "74.7").
+    private static String canonNum(String num) {
+        String n = num.replace(',', '.');
+        try {
+            double d = Double.parseDouble(n);
+            if (Math.abs(d - Math.rint(d)) < 1e-9) return String.valueOf((long) Math.rint(d));
+            return String.valueOf(Math.round(d * 10.0) / 10.0);
+        } catch (NumberFormatException e) {
+            return n;
+        }
+    }
 
     private AccountingLock buildAccountingLock(String documentText, String summary) {
         if (documentText == null || summary == null) {
@@ -663,36 +710,19 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 foreignMoney.add(tok);
             }
         }
-        // Yabanci bolgede olup secilen bolgede OLMAYAN yuzdeler de yasakli capa
-        // (or. UFRS finansman gideri %74,7 / %41,0 — TMS bolgesinde gecmiyorsa kilide girer).
-        // Yuzdeler normalize edilir ("%41,0" -> "%41") ki model ",0"'i atip yuvarladiginda da
-        // yakalansin. Secilen bolgenin normalize yuzdesi varsa capaya EKLENMEZ (yanlis silme onlenir).
-        Set<String> chosenPct = new LinkedHashSet<>();
-        for (String tok : percentTokens(chosenRegion)) {
-            chosenPct.add(normalizePercent(tok));
-        }
+        // Yabanci bolgede olup secilen bolgede OLMAYAN yuzdeler de yasakli capa.
+        // Yuzdeler DIL/FORMAT BAGIMSIZ kanonik sayiya cevrilir (canonPercents), boylece
+        // Ingilizce cikti (74.7% / nokta ondalik) da ayni capaya eslesir. Secilen bolgede
+        // ayni kanonik yuzde varsa capaya EKLENMEZ (or. FAVOK marji %41,8 yanlislikla silinmez).
+        Set<String> chosenPct = canonPercents(chosenRegion);
         Set<String> foreignPct = new LinkedHashSet<>();
-        for (String tok : percentTokens(foreignRegion)) {
-            String norm = normalizePercent(tok);
-            if (!chosenPct.contains(norm)) {
-                foreignPct.add(norm);
+        for (String p : canonPercents(foreignRegion)) {
+            if (!chosenPct.contains(p)) {
+                foreignPct.add(p);
             }
         }
         return (foreignMoney.isEmpty() && foreignPct.isEmpty())
                 ? null : new AccountingLock(foreignMoney, foreignPct);
-    }
-
-    // Yuzdeyi karsilastirma icin normalize eder: bosluklari atar ve yalnizca sondaki ",0"'i
-    // dusurer. "%41,0" -> "%41", "% 41,0" -> "%41", "%74,7" -> "%74,7", "%41,8" -> "%41,8".
-    // Boylece model UFRS "%41,0"'i "%41" diye yazsa da kilit yakalar; ama farkli bir kalemin
-    // "%41,8"'i (TMS FAVOK marji gibi) yanlislikla eslesmez.
-    private static String normalizePercent(String pct) {
-        if (pct == null) return "";
-        String p = pct.replace(" ", "");
-        if (p.endsWith(",0")) {
-            p = p.substring(0, p.length() - 2);
-        }
-        return p;
     }
 
     private static String safeSub(String s, int a, int b) {
@@ -710,17 +740,6 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             if (norm.replace(",", "").length() >= 4) {
                 out.add(norm);
             }
-        }
-        return out;
-    }
-
-    // Bolgedeki yuzde ifadelerini normalize edip dondurur ("%74,7", "%24,1").
-    // violatesLock evidence'i da bosluksuz/noktasiz karsilastirdigi icin capalar da bosluksuz.
-    private Set<String> percentTokens(String region) {
-        Set<String> out = new LinkedHashSet<>();
-        Matcher m = PERCENT_TOKEN.matcher(region);
-        while (m.find()) {
-            out.add(m.group().replace(" ", ""));
         }
         return out;
     }
