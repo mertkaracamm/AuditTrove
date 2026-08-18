@@ -42,6 +42,12 @@ public class AuditJobService {
         job.setStatus(AuditJob.Status.PROCESSING);
         try {
             AuditResponse response = auditService.audit(filename, content, language, documentType);
+            // Kullanici bu arada iptal ettiyse: sonuc/kota/push YOK.
+            if (job.isCancelled()) {
+                job.setStatus(AuditJob.Status.FAILED);
+                job.setError("İnceleme iptal edildi");
+                return;
+            }
             job.setResult(response);
             job.setStatus(AuditJob.Status.DONE);
             if (job.deviceId() != null && decision != null) {

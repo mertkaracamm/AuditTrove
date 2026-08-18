@@ -734,7 +734,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
     // skor, bulgu siddet dagilimiyla ayni bantta kalsin
     // Skor TAMAMEN bulgu dagilimindan hesaplanir; LLM'in verdigi skor KULLANILMAZ.
-    // Boylece ayni belge (ayni bulgular) her calistirmada AYNI skoru verir — tutarsizlik biter.
+    // YUKSEK skor = temiz/guvenli, DUSUK skor = dikkat. 100'den baslar, bulgular dusurur.
+    // Ayni belge (ayni bulgular) her calistirmada AYNI skoru verir.
     // En yuksek onem seviyesi bandi garanti edilir; cumle ve renk de bu banttan turer.
     private int calibrateScore(int ignoredLlmScore, List<AuditResponse.Risk> risks) {
         int crit = 0, high = 0, mid = 0, low = 0;
@@ -749,11 +750,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 }
             }
         }
-        int raw = crit * 45 + high * 28 + mid * 8 + low * 3;
-        if (crit > 0) return Math.max(71, Math.min(100, raw));   // kritik → kırmızı bant
-        if (high > 0) return Math.max(46, Math.min(100, raw));   // yüksek → turuncu bant
-        if (mid > 0) return Math.max(21, Math.min(70, raw));     // orta → sarı bant
-        return Math.max(5, Math.min(20, raw));                   // sadece düşük/temiz → yeşil bant
+        int penalty = crit * 45 + high * 28 + mid * 8 + low * 3;
+        int score = Math.max(0, Math.min(100, 100 - penalty));
+        // Bant garantisi (yuksek=iyi): en agir bulgu skorun tavanini belirler.
+        if (crit > 0) return Math.min(29, score);                 // kırmızı — madde madde
+        if (high > 0) return Math.max(30, Math.min(54, score));   // turuncu — dikkatle
+        if (mid > 0)  return Math.max(55, Math.min(79, score));   // sarı — gözden geçir
+        return Math.max(80, Math.min(100, score));                // yeşil — temiz
     }
 
     private String languageInstruction(String language) {

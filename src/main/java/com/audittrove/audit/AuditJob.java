@@ -17,6 +17,7 @@ public class AuditJob {
     private volatile Status status;
     private volatile AuditResponse result;
     private volatile String error;
+    private volatile boolean cancelled = false;
 
     public AuditJob(String id, String deviceId, String fileName, String language) {
         this.id = id;
@@ -38,4 +39,6 @@ public class AuditJob {
     public void setResult(AuditResponse result) { this.result = result; }
     public String error() { return error; }
     public void setError(String error) { this.error = error; }
+    public boolean isCancelled() { return cancelled; }
+    public void setCancelled(boolean cancelled) { this.cancelled = cancelled; }
 }

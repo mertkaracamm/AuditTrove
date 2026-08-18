@@ -56,7 +56,9 @@ public class MobileAuthFilter extends OncePerRequestFilter {
                 && uri != null && uri.startsWith("/api/v1/audit/jobs/");
         boolean pushToken = "POST".equalsIgnoreCase(method)
                 && "/api/v1/devices/push-token".equals(uri);
-        return !(submit || statusQuery || pushToken);
+        boolean cancel = "POST".equalsIgnoreCase(method)
+                && uri != null && uri.startsWith("/api/v1/audit/jobs/") && uri.endsWith("/cancel");
+        return !(submit || statusQuery || pushToken || cancel);
     }
 
     /** Hafif yollar (durum sorgusu + push token kaydi): rate limit ve kota atlanir, yalnizca token dogrulanir. */
@@ -66,7 +68,9 @@ public class MobileAuthFilter extends OncePerRequestFilter {
         if (uri == null) return false;
         boolean statusQuery = "GET".equalsIgnoreCase(method) && uri.startsWith("/api/v1/audit/jobs/");
         boolean pushToken = "POST".equalsIgnoreCase(method) && "/api/v1/devices/push-token".equals(uri);
-        return statusQuery || pushToken;
+        boolean cancel = "POST".equalsIgnoreCase(method)
+                && uri.startsWith("/api/v1/audit/jobs/") && uri.endsWith("/cancel");
+        return statusQuery || pushToken || cancel;
     }
 
     @Override

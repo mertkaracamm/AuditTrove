@@ -98,4 +98,20 @@ public class AuditController {
         }
         return ResponseEntity.ok(AuditJobResponse.of(job));
     }
+
+    // --- Async iptal: kullanici incelemeyi birakirsa push/kota gonderilmesin ---
+    @PostMapping("/audit/jobs/{id}/cancel")
+    @Operation(summary = "Devam eden async incelemeyi iptal eder")
+    public ResponseEntity<Void> cancelJob(@PathVariable String id, HttpServletRequest request) {
+        AuditJob job = jobStore.get(id);
+        if (job == null) {
+            return ResponseEntity.notFound().build();
+        }
+        String deviceId = (String) request.getAttribute(MobileAuthFilter.DEVICE_ID_ATTR);
+        if (job.deviceId() != null && !job.deviceId().equals(deviceId)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+        job.setCancelled(true);
+        return ResponseEntity.ok().build();
+    }
 }
