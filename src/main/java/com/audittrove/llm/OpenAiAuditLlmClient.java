@@ -9,6 +9,9 @@ import org.springframework.http.MediaType;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.HttpClientErrorException;
+import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.ResourceAccessException;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -179,13 +182,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                         Map.of("role", "system", "content", SYSTEM_PROMPT + typeInstruction(documentType) + languageInstruction(language)),
                         Map.of("role", "user", "content", userPrompt(documentText, context))));
         try {
-            JsonNode response = restClient.post()
-                    .uri("/v1/chat/completions")
-                    .header("Authorization", "Bearer " + apiKey)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(body)
-                    .retrieve()
-                    .body(JsonNode.class);
+            JsonNode response = postToLlmWithRetry(body);
             String content = response.at("/choices/0/message/content").asText();
             if (content.isBlank()) {
                 throw new LlmUnavailableException("LLM boş yanıt döndürdü");
@@ -195,6 +192,53 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             throw exception;
         } catch (Exception exception) {
             throw new LlmUnavailableException("LLM değerlendirmesi tamamlanamadı", exception);
+        }
+    }
+
+    // OpenAI cagrisini gecici hatalara karsi tekrar dener. Uzun belgede ~19 ardisik cagri
+    // yapildigindan, tek bir gecici hata (429 rate limit / 5xx / timeout) tum isi cokertmesin.
+    // Kalici hatalar (4xx, 429 disi) hemen firlatilir.
+    private JsonNode postToLlmWithRetry(Map<String, Object> body) {
+        int maxAttempts = 3;
+        long backoffMs = 2000;
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                return restClient.post()
+                        .uri("/v1/chat/completions")
+                        .header("Authorization", "Bearer " + apiKey)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body(body)
+                        .retrieve()
+                        .body(JsonNode.class);
+            } catch (HttpClientErrorException e) {
+                // Yalnizca 429 (rate limit) tekrar denenir; diger 4xx kalicidir
+                if (e.getStatusCode().value() == 429 && attempt < maxAttempts) {
+                    last = e;
+                    sleepQuietly(backoffMs);
+                    backoffMs *= 2;
+                    continue;
+                }
+                throw e;
+            } catch (HttpServerErrorException | ResourceAccessException e) {
+                // 5xx / timeout / ag hatasi → gecici, tekrar dene
+                if (attempt < maxAttempts) {
+                    last = e;
+                    sleepQuietly(backoffMs);
+                    backoffMs *= 2;
+                    continue;
+                }
+                throw e;
+            }
+        }
+        throw last; // ulasilmaz
+    }
+
+    private void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -335,13 +379,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                     "messages", List.of(
                             Map.of("role", "system", "content", instruction),
                             Map.of("role", "user", "content", joined)));
-            JsonNode response = restClient.post()
-                    .uri("/v1/chat/completions")
-                    .header("Authorization", "Bearer " + apiKey)
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(body)
-                    .retrieve()
-                    .body(JsonNode.class);
+            JsonNode response = postToLlmWithRetry(body);
             String content = response.at("/choices/0/message/content").asText();
             return content.isBlank() ? partialSummaries.get(0) : content.trim();
         } catch (Exception e) {
