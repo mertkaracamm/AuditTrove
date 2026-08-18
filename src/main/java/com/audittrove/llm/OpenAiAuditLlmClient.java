@@ -606,8 +606,15 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
     }
 
-    private static final Pattern STD_TMS = Pattern.compile("\\bTMS\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern STD_IFRS = Pattern.compile("\\b(UFRS|IFRS)\\b", Pattern.CASE_INSENSITIVE);
+    // Standart tespiti ozette: yalnizca kisaltma (TMS/UFRS) degil, tam ad ve Ingilizce
+    // varyantlari da yakalanir. Aksi halde ozet standardi tam adiyla soyler ya da hic
+    // soylemezse (or. Ingilizce ozet) kilit kurulmaz ve UFRS rakami (%74,7/%41) sizar.
+    private static final Pattern STD_TMS = Pattern.compile(
+            "\\bTMS\\b|T[\u00fcu]rkiye Muhasebe|Turkish Accounting",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern STD_IFRS = Pattern.compile(
+            "\\b(UFRS|IFRS)\\b|Uluslararas[\u0131i] Finansal|International Financial",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     // Bir standart tablosunun basladigi cumle ("... TMS ... uygun olarak hazirlanmis")
     private static final Pattern TMS_HEADER =
             Pattern.compile("(TMS)[^\\n]{0,80}(uygun|hazirlan|dayan)", Pattern.CASE_INSENSITIVE);
@@ -624,22 +631,23 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         if (documentText == null || summary == null) {
             return null;
         }
-        // Ozet hangi standardi soyluyor?
-        boolean summaryTms = STD_TMS.matcher(summary).find();
-        boolean summaryIfrs = STD_IFRS.matcher(summary).find();
-        if (summaryTms == summaryIfrs) {
-            return null; // ikisi de yok ya da ikisi de var — kilit uygulanamaz
-        }
-        // Belgeyi standart basliklarindan iki bolgeye ayir
+        // Belgeyi standart basliklarindan iki bolgeye ayir. Iki standart bolgesi de net
+        // degilse dokunma (tek standartli belge — karisma riski yok).
         Matcher tmsH = TMS_HEADER.matcher(documentText);
         Matcher ifrsH = IFRS_HEADER.matcher(documentText);
         if (!tmsH.find() || !ifrsH.find()) {
-            return null; // iki standart bolgesi net degilse dokunma
+            return null;
         }
         int tmsStart = tmsH.start();
         int ifrsStart = ifrsH.start();
+        // Ozet hangi standardi soyluyor? Net soyluyorsa onu sec; belirsizse (or. Ingilizce
+        // ozet standardi hic anmadi ya da ikisini birden andi) belgede ONCE gelen standardi
+        // sec — boylece kilit dilden bagimsiz calisir ve devre disi kalmaz.
+        boolean summaryTms = STD_TMS.matcher(summary).find();
+        boolean summaryIfrs = STD_IFRS.matcher(summary).find();
+        boolean chooseTms = (summaryTms ^ summaryIfrs) ? summaryTms : (tmsStart <= ifrsStart);
         String chosenRegion, foreignRegion;
-        if (summaryTms) {
+        if (chooseTms) {
             // Secilen TMS: bolgesi tmsStart..ifrsStart (TMS once geliyorsa), yabanci = UFRS sonrasi
             chosenRegion = safeSub(documentText, tmsStart, ifrsStart > tmsStart ? ifrsStart : documentText.length());
             foreignRegion = safeSub(documentText, ifrsStart, ifrsStart > tmsStart ? documentText.length() : tmsStart);
