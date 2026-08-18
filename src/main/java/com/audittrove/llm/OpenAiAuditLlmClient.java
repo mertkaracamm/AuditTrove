@@ -172,6 +172,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         Map<String, Object> body = Map.of(
                 "model", model,
                 "temperature", 0,
+                "seed", 7,
                 "response_format", Map.of(
                         "type", "json_schema",
                         "json_schema", Map.of(
