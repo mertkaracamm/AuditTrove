@@ -47,9 +47,14 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             A marked drop in profitability (operating profit or net income falling by a large
             percentage, e.g. tens of percent) is NEVER LOW — it is at least MEDIUM. Do not understate
             the severity of clear financial deterioration or cost pressure.
-            The summary, scoreRationale and findings must never contradict each other. A finding title must
-            match the direction of its evidence: an improving or reader-favorable item must never be titled
-            as a problem; report such items as LOW severity observations or omit them.
+            The summary, scoreRationale and findings must never contradict each other.
+            FINDINGS ARE ONLY for genuine concerns, risks, or points the reader should scrutinize —
+            NEVER for achievements, positive results, or reader-favorable items. If something is positive
+            or neutral (e.g. revenue growth, strong margins, successful investments, a routine favorable
+            decision, an improving ratio), you may mention it in the summary when relevant, but DO NOT
+            list it as a finding. A finding's title must match the direction of its evidence and must
+            never frame a favorable item as a problem. It is correct to return few findings — or none —
+            when the document is genuinely clean; do not pad the list with positive observations.
             Findings must be concise and evidence-based. Every finding must cite the page it comes from
             using ONLY the number inside the nearest preceding [REPORT PAGE n] marker in the supplied
             text. NEVER use printed page numbers, footer numbers, section numbers or table numbers
