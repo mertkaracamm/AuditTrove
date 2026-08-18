@@ -1,108 +1,106 @@
 <p align="center">
-  <img src="./docs/audittrove-banner.svg" alt="AuditTrove — Financial Document Intelligence" width="100%">
+  <img src="./docs/audittrove-banner.svg" alt="AuditTrove — Document Review Intelligence" width="100%">
 </p>
 
 # AuditTrove
 
-AuditTrove is a Spring Boot service for AI-assisted auditing of Turkish financial documents. It extracts text from uploaded PDFs, retrieves relevant financial regulations, and uses an LLM to produce a structured risk assessment with traceable legal references.
+AuditTrove is a Spring Boot service that powers **AI-assisted document review** for the AuditTrove mobile app (iOS and Android). It extracts text from uploaded documents, runs them through an OpenAI-based analysis pipeline, and returns a structured, page-referenced review: a score, an executive summary, attention points with supporting evidence, key metrics, recommended actions, and questions to ask a professional before acting.
 
-The project is being developed as the backend of a **ChatGPT app**. It exposes both a REST API and an MCP endpoint so the document-audit workflow can be connected to ChatGPT after deployment.
+The service is the backend for a native mobile client built with React Native / Expo ([AuditTrove-Mobile](https://github.com/mertkaracamm/AuditTrove-Mobile)). It handles device-based authentication, per-device usage quota, long-running analysis as background jobs, and push notifications when a review is ready.
 
-> AuditTrove is a decision-support tool, not a substitute for legal advice. Audit findings and regulatory references must be reviewed by a qualified professional before they are relied upon.
+> AuditTrove is a decision-support tool — not financial, accounting, investment, tax, or legal advice. For non-financial documents it reports only what the document itself says and never asserts whether a clause is legal, enforceable, or compliant. Findings must be reviewed by a qualified professional before they are relied upon.
 
-## Supported documents
+## Supported document types
 
-- Consumer and commercial loan agreements
-- Credit card agreements
-- Bank account agreements
-- Bank statements
-- Other financial agreements
+The analysis prompt adapts to the selected document type. Financial reports are the most deeply supported type; the others are reviewed as "attention points" without any legal/regulatory claims.
 
-## Audit output
+- Financial reports (annual/interim reports, financial statements)
+- Rental / lease agreements
+- Subscription / membership / service commitments
+- Insurance policies
+- Vehicle purchase / sale agreements
+- Employment contracts
+- General documents
 
-Each audit returns:
+## Review output
 
-- A risk score from 0 to 100
+Each review returns:
+
+- A score from 0 (needs line-by-line scrutiny) to 100 (generally clean) — computed **deterministically from the findings**, not taken from the model
+- A one-sentence score rationale
 - An executive summary
-- Identified risks and supporting evidence
+- Attention points (findings) with severity and page-referenced evidence
+- Key metrics pulled from the document
 - Recommended actions
-- Relevant regulatory references
-
-Example response:
+- Advisor questions to ask before acting
 
 ```json
 {
-  "riskScore": 81,
-  "summary": "The agreement contains several clauses that require review.",
-  "risks": [],
-  "recommendations": [],
-  "references": []
+  "riskScore": 79,
+  "scoreRationale": "…",
+  "summary": "…",
+  "risks": [{ "title": "…", "severity": "MEDIUM", "finding": "…", "evidence": "… (Sayfa 10)" }],
+  "recommendations": ["…"],
+  "keyMetrics": [{ "label": "…", "value": "…", "note": "…" }],
+  "advisorQuestions": ["…"],
+  "references": [{ "source": "Rapor Sayfa 10", "article": "", "title": "" }]
 }
 ```
 
 ## How it works
 
-1. A PDF is validated and its text is extracted with Apache PDFBox.
-2. The RAG layer retrieves provisions relevant to the document.
-3. The retrieved legal context and document text are sent to the configured OpenAI model.
-4. The model returns a structured audit result through the REST API or MCP tool.
-
-The legal corpus is designed for regulations from:
-
-- Banking Regulation and Supervision Agency (BDDK)
-- Central Bank of the Republic of Türkiye (TCMB)
-- Law No. 6502 on Consumer Protection
-- Banking Law No. 5411
-
-## Technology
-
-- Java 17
-- Spring Boot 3
-- Apache PDFBox
-- PostgreSQL and pgvector-ready legal corpus schema
-- Flyway database migrations
-- OpenAI API
-- OpenAPI / Swagger UI
-- Model Context Protocol (MCP)
-- Docker and Railway
+1. A document (PDF, or a phone scan/photo turned into a PDF on the device) is validated and its text is extracted with Apache PDFBox. Owner-password PDFs are opened; only true open-password PDFs are rejected.
+2. The text is split into `[REPORT PAGE n]` sections. Large documents are chunked so a long report is reviewed in full rather than truncated.
+3. Each section is analyzed with the configured OpenAI model against a type-specific prompt.
+4. A deterministic post-process grounds every finding's evidence to a real page marker, calibrates the score from the finding severities, and enforces a single-accounting-standard lock for financial reports (e.g. no mixing TMS and UFRS figures).
+5. The result is returned via REST, either synchronously or through the async job API.
 
 ## API
 
-### Audit a document
-
-```http
-POST /api/v1/audit
-Content-Type: multipart/form-data
-```
-
-```bash
-curl -X POST http://localhost:8080/api/v1/audit \
-  -F "file=@agreement.pdf"
-```
-
-Other endpoints:
+Base path: `/api/v1`.
 
 | Endpoint | Purpose |
 | --- | --- |
+| `POST /api/v1/audit` | Synchronous review (small documents) |
+| `POST /api/v1/audit/async` | Start a review; returns `202` with a `jobId` |
+| `GET /api/v1/audit/jobs/{id}` | Poll job status/result |
+| `POST /api/v1/audit/jobs/{id}/cancel` | Cancel a running review |
+| `POST /api/v1/devices` | Register a device, obtain an auth token |
+| `POST /api/v1/devices/push-token` | Register the Expo push token for a device |
 | `/swagger-ui.html` | Interactive REST API documentation |
 | `/api-docs` | OpenAPI specification |
 | `/actuator/health` | Service health check |
-| `/mcp` | MCP endpoint for ChatGPT integration |
+
+Long documents are processed in the background so the client never blocks on a timeout. Jobs run on a small thread pool, are held in memory with a 30-minute TTL, and usage quota is only recorded when a job completes successfully. When a job finishes, the service sends an Expo push notification to the device that started it.
+
+## Security and quota
+
+- **Device auth:** stateless HMAC-SHA256 device tokens (`MobileAuthFilter`, `DeviceTokenService`, `DeviceRegistrationController`).
+- **Quota:** per-device monthly usage tracked in Postgres; a subscription (verified via RevenueCat) lifts the free-tier limit. Hourly rate limiting protects the API; polling, cancel, and push-token registration are exempt so they don't burn the limit.
+- **Privacy:** documents are processed in memory for analysis and are **not** persisted to a database. Only anonymous per-device usage counters are stored.
+
+## Technology
+
+- Java 17 / Spring Boot 3
+- Apache PDFBox (text extraction)
+- PostgreSQL (device usage; optional pgvector-ready corpus schema)
+- Flyway migrations
+- OpenAI API
+- Expo Push (server-side notifications)
+- OpenAPI / Swagger UI
+- Docker and Railway
 
 ## Run locally
 
-Requirements:
-
-- Java 17 or later
-- Maven 3.9 or later
-- An OpenAI API key
+Requirements: Java 17+, Maven 3.9+, an OpenAI API key.
 
 ```bash
 export OPENAI_API_KEY="your-api-key"
+export MOBILE_TOKEN_SECRET="a-long-random-secret"
 mvn spring-boot:run
 ```
 
-Run the test suite:
+Run the tests:
 
 ```bash
 mvn clean test
@@ -113,36 +111,19 @@ mvn clean test
 | Environment variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `OPENAI_API_KEY` | Yes | — | OpenAI API key used for document analysis |
-| `OPENAI_MODEL` | No | `gpt-4.1-mini` | Model used for the audit |
+| `MOBILE_TOKEN_SECRET` | Yes | — | HMAC secret for device auth tokens |
+| `OPENAI_MODEL` | No | `gpt-4.1-mini` | Model used for the review |
 | `OPENAI_BASE_URL` | No | `https://api.openai.com` | OpenAI API base URL |
 | `OPENAI_TIMEOUT_SECONDS` | No | `90` | LLM request timeout |
 | `PORT` | No | `8080` | HTTP server port |
 | `MAX_FILE_SIZE` | No | `15MB` | Multipart upload limit |
 | `MAX_PDF_BYTES` | No | `15728640` | PDF validation limit in bytes |
-| `RAG_RESULT_LIMIT` | No | `8` | Maximum number of retrieved provisions |
-| `RAG_DATABASE_URL` | No | — | PostgreSQL JDBC URL |
+| `AUDIT_RATE_LIMIT_PER_HOUR` | No | `5` | Hourly request limit per device (production runs higher) |
+| `REVENUECAT_API_KEY` | No | — | Verifies subscription entitlements; empty means everyone is free-tier |
+| `RAG_DATABASE_URL` | No | — | PostgreSQL JDBC URL (device usage + optional corpus) |
 | `RAG_DATABASE_USERNAME` | No | — | PostgreSQL username |
 | `RAG_DATABASE_PASSWORD` | No | — | PostgreSQL password |
 | `RAG_DATABASE_MIGRATE` | No | `true` | Run Flyway migrations on startup |
-
-## Legal corpus and RAG
-
-AuditTrove supports two corpus modes:
-
-- Without `RAG_DATABASE_URL`, the application uses a small bundled development corpus.
-- With PostgreSQL and pgvector, Flyway creates a schema for raw official documents, article- and paragraph-level provisions, version history, relationships, embeddings, and audit references.
-
-The bundled records in `src/main/resources/regulations/tr/financial-regulations.json` are development seed data. They are not a complete or authoritative legal dataset. A production deployment must ingest official texts, preserve their effective dates and source URLs, calculate content hashes, and mark records as verified only after expert review.
-
-PostgreSQL example:
-
-```bash
-export RAG_DATABASE_URL="jdbc:postgresql://localhost:5432/audittrove"
-export RAG_DATABASE_USERNAME="audittrove"
-export RAG_DATABASE_PASSWORD="secret"
-```
-
-The target PostgreSQL service must provide the `vector` extension.
 
 ## Docker
 
@@ -150,27 +131,14 @@ The target PostgreSQL service must provide the `vector` extension.
 docker build -t audittrove .
 docker run --rm -p 8080:8080 \
   -e OPENAI_API_KEY="your-api-key" \
+  -e MOBILE_TOKEN_SECRET="a-long-random-secret" \
   audittrove
 ```
 
 ## Deploy to Railway
 
-The repository includes a multi-stage `Dockerfile` and `railway.toml`. Connect the GitHub repository to a Railway project, add `OPENAI_API_KEY`, and deploy. Railway uses `/actuator/health` for health checks.
-
-For database-backed retrieval, add a PostgreSQL service with pgvector support and configure the `RAG_DATABASE_*` variables.
-
-## ChatGPT app integration
-
-AuditTrove includes an MCP tool named `audit_financial_document`. After deploying the service to a stable public HTTPS URL, the intended MCP connection URL is:
-
-```text
-https://<your-domain>/mcp
-```
-
-Before connecting or publishing the app, validate initialization, tool discovery, schemas, and representative tool calls with MCP Inspector. Then connect the public `/mcp` endpoint in ChatGPT developer mode and complete end-to-end testing.
-
-The MCP integration is currently backend-only; it does not include a custom in-ChatGPT UI.
+The repository includes a multi-stage `Dockerfile` and `railway.toml`. Connect the GitHub repository to a Railway project, add the environment variables above (at minimum `OPENAI_API_KEY` and `MOBILE_TOKEN_SECRET`), attach a PostgreSQL service, and deploy. Railway uses `/actuator/health` for health checks.
 
 ## Project status
 
-AuditTrove is under active development. The core PDF audit flow, REST endpoint, legal retrieval infrastructure, Docker deployment, and initial MCP endpoint are implemented. The authoritative regulatory corpus, production security controls, and ChatGPT publication review remain pre-release work.
+AuditTrove is in pre-release, preparing for App Store and Google Play launch. The document review pipeline, async job flow, device auth, quota, push notifications, and Railway deployment are implemented and running. Remaining pre-launch work is store submission (screenshots, listing copy, TestFlight/closed testing) and ongoing report-quality tuning.
