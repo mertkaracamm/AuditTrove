@@ -33,7 +33,7 @@ public class MobileAuthFilter extends OncePerRequestFilter {
     public MobileAuthFilter(
             DeviceTokenService tokenService,
             QuotaService quotaService,
-            @Value("${audittrove.security.audit-rate-limit-per-hour:5}") int limitPerHour) {
+            @Value("${audittrove.security.audit-rate-limit-per-hour:20}") int limitPerHour) {
         this.tokenService = tokenService;
         this.quotaService = quotaService;
         this.limitPerHour = limitPerHour;
