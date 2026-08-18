@@ -138,7 +138,17 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                     line item (e.g. finance expenses) appears there with a different scope or a more dramatic
                     change. If a line item's value or direction differs between the two standards, you must
                     use the chosen standard's value and direction; a change that exists only under the other
-                    standard must not be reported as a finding.
+                    standard must not be reported as a finding, in a keyMetric, in the summary, or in an
+                    advisor question.
+                    Direction is part of the lock. The SAME line item can move UP under one standard and DOWN
+                    under the other (finance expenses are a classic example). Report ONLY the chosen standard's
+                    direction for that item. Never describe one line item as both an increase and a decrease
+                    anywhere in your output; the summary, scoreRationale, findings and keyMetrics must all agree
+                    on a single direction per item, taken from the chosen standard's table.
+                    Do not round a figure or its percentage in a way that changes it or hides which table it
+                    came from (e.g. do not turn the other standard's "%41,0" into "%41" and present it as if it
+                    were the chosen standard's number). Quote percentages exactly as they appear in the chosen
+                    standard's table.
                     Multiple HIGH findings combined with liquidity or going-concern signals justify the
                     71-100 band even without a single CRITICAL finding.
                     """;
@@ -489,25 +499,35 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         // 3) Skor kelepcesi (RAG bos olsa da HER ZAMAN calisir)
         int calibratedScore = calibrateScore(response.riskScore(), groundedRisks);
 
-        // Standart kilidini ozet ve sorulara da uygula: yasakli capayi ( or. %74,7 / 11.678,7)
-        // iceren cumleyi ozetten cikar, o rakami iceren danisman sorusunu ele.
+        // Standart kilidini ozet, skor gerekcesi ve sorulara da uygula: yasakli capayi
+        // (or. %74,7 / %41,0 / 11.678,7) iceren cumleyi ozet ve gerekceden cikar, o rakami
+        // iceren danisman sorusunu ele. scoreRationale tek-cagri yolunda dogrudan LLM'den
+        // geldigi icin skor barinin altindaki italik metne yabanci rakam sizabiliyordu.
         String summary = response.summary();
+        String rationale = response.scoreRationale();
         List<String> questions = response.advisorQuestions();
         if (lock != null) {
             summary = lock.scrubSummary(summary);
+            rationale = lock.scrubSummary(rationale);
             questions = questions == null ? null : questions.stream()
                     .filter(q -> !lock.violatesLock(q))
                     .toList();
         }
 
         // keyMetrics: parantezli ham tablo verisi ("(2.609,7) (2.917,3) %11,8") deger olarak
-        // sizmissa temizle — kullaniciya okunur tek deger kalsin.
+        // sizmissa temizle — kullaniciya okunur tek deger kalsin. Ayrica standart kilidini
+        // keyMetrics'e de uygula: yabanci standart capasi (or. UFRS "%41,0") tasiyan kart dusurulur,
+        // yoksa ozetten silinen celiskili rakam kart olarak sizmaya devam eder.
         List<AuditResponse.KeyMetric> cleanMetrics = response.keyMetrics() == null ? null :
                 response.keyMetrics().stream()
+                        .filter(m -> lock == null || !lock.violatesLock(
+                                (m.label() == null ? "" : m.label()) + " "
+                                        + (m.value() == null ? "" : m.value()) + " "
+                                        + (m.note() == null ? "" : m.note())))
                         .map(this::cleanMetric)
                         .toList();
 
-        return new AuditResponse(calibratedScore, response.scoreRationale(), summary,
+        return new AuditResponse(calibratedScore, rationale, summary,
                 groundedRisks, response.recommendations(), cleanMetrics,
                 questions, references);
     }
@@ -537,15 +557,29 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // degerlerle sunabilir. Ozet hangi standardi sectiyse, YALNIZCA diger standardin
     // bolgesine ozgu rakamlari tasiyan bulgular elenir. Boylece "TMS sectim" deyip
     // finansman giderini UFRS'ten alan (%74,7) bulgu deterministik olarak dusurulur.
-    private record AccountingLock(Set<String> foreignOnlyAnchors) {
+    private record AccountingLock(Set<String> moneyAnchors, Set<String> percentAnchors) {
         boolean violatesLock(String evidence) {
-            if (evidence == null || foreignOnlyAnchors.isEmpty()) {
+            if (evidence == null || (moneyAnchors.isEmpty() && percentAnchors.isEmpty())) {
                 return false;
             }
-            String norm = evidence.replace(".", "").replace(" ", "");
-            for (String anchor : foreignOnlyAnchors) {
-                if (norm.contains(anchor)) {
-                    return true;
+            // Para capalari: bosluk/nokta atilmis metinde substring ara ("11.678,7" -> "11678,7")
+            if (!moneyAnchors.isEmpty()) {
+                String norm = evidence.replace(".", "").replace(" ", "");
+                for (String anchor : moneyAnchors) {
+                    if (norm.contains(anchor)) {
+                        return true;
+                    }
+                }
+            }
+            // Yuzde capalari: token bazli + yuvarlama toleransli. Metindeki her yuzdeyi
+            // normalize edip ("%41,0" -> "%41") capa kumesiyle karsilastir. Boylece model
+            // ",0"'i atip "%41" yazsa bile yakalanir; ama "%41,8" (baska kalem) yakalanmaz.
+            if (!percentAnchors.isEmpty()) {
+                Matcher pm = PERCENT_TOKEN.matcher(evidence);
+                while (pm.find()) {
+                    if (percentAnchors.contains(normalizePercent(pm.group()))) {
+                        return true;
+                    }
                 }
             }
             return false;
@@ -555,7 +589,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         // kilit ihlaline gore filtreler, kalanlari birlestirir. Boylece "TMS sectim" deyip
         // ozette UFRS rakami (%74,7 / 11.678,7) geciren cumle silinir.
         String scrubSummary(String summary) {
-            if (summary == null || summary.isBlank() || foreignOnlyAnchors.isEmpty()) {
+            if (summary == null || summary.isBlank()
+                    || (moneyAnchors.isEmpty() && percentAnchors.isEmpty())) {
                 return summary;
             }
             String[] sentences = summary.split("(?<=[.!?])\\s+");
@@ -614,21 +649,42 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
         // Yabanci bolgede olup secilen bolgede OLMAYAN para rakamlari = "yasakli capalar"
         Set<String> chosen = moneyTokens(chosenRegion);
-        Set<String> foreignOnly = new LinkedHashSet<>();
+        Set<String> foreignMoney = new LinkedHashSet<>();
         for (String tok : moneyTokens(foreignRegion)) {
             if (!chosen.contains(tok)) {
-                foreignOnly.add(tok);
+                foreignMoney.add(tok);
             }
         }
         // Yabanci bolgede olup secilen bolgede OLMAYAN yuzdeler de yasakli capa
-        // (or. UFRS finansman gideri %74,7 — TMS bolgesinde gecmiyorsa kilide girer).
-        Set<String> chosenPct = percentTokens(chosenRegion);
+        // (or. UFRS finansman gideri %74,7 / %41,0 — TMS bolgesinde gecmiyorsa kilide girer).
+        // Yuzdeler normalize edilir ("%41,0" -> "%41") ki model ",0"'i atip yuvarladiginda da
+        // yakalansin. Secilen bolgenin normalize yuzdesi varsa capaya EKLENMEZ (yanlis silme onlenir).
+        Set<String> chosenPct = new LinkedHashSet<>();
+        for (String tok : percentTokens(chosenRegion)) {
+            chosenPct.add(normalizePercent(tok));
+        }
+        Set<String> foreignPct = new LinkedHashSet<>();
         for (String tok : percentTokens(foreignRegion)) {
-            if (!chosenPct.contains(tok)) {
-                foreignOnly.add(tok);
+            String norm = normalizePercent(tok);
+            if (!chosenPct.contains(norm)) {
+                foreignPct.add(norm);
             }
         }
-        return foreignOnly.isEmpty() ? null : new AccountingLock(foreignOnly);
+        return (foreignMoney.isEmpty() && foreignPct.isEmpty())
+                ? null : new AccountingLock(foreignMoney, foreignPct);
+    }
+
+    // Yuzdeyi karsilastirma icin normalize eder: bosluklari atar ve yalnizca sondaki ",0"'i
+    // dusurer. "%41,0" -> "%41", "% 41,0" -> "%41", "%74,7" -> "%74,7", "%41,8" -> "%41,8".
+    // Boylece model UFRS "%41,0"'i "%41" diye yazsa da kilit yakalar; ama farkli bir kalemin
+    // "%41,8"'i (TMS FAVOK marji gibi) yanlislikla eslesmez.
+    private static String normalizePercent(String pct) {
+        if (pct == null) return "";
+        String p = pct.replace(" ", "");
+        if (p.endsWith(",0")) {
+            p = p.substring(0, p.length() - 2);
+        }
+        return p;
     }
 
     private static String safeSub(String s, int a, int b) {
