@@ -171,7 +171,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                                       String language, String documentType) {
         Map<String, Object> body = Map.of(
                 "model", model,
-                "temperature", 0.1,
+                "temperature", 0,
                 "response_format", Map.of(
                         "type", "json_schema",
                         "json_schema", Map.of(
@@ -732,22 +732,27 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     }
 
     // skor, bulgu siddet dagilimiyla ayni bantta kalsin
-    private int calibrateScore(int score, List<AuditResponse.Risk> risks) {
-        boolean critical = false, high = false, medium = false;
+    // Skor TAMAMEN bulgu dagilimindan hesaplanir; LLM'in verdigi skor KULLANILMAZ.
+    // Boylece ayni belge (ayni bulgular) her calistirmada AYNI skoru verir — tutarsizlik biter.
+    // En yuksek onem seviyesi bandi garanti edilir; cumle ve renk de bu banttan turer.
+    private int calibrateScore(int ignoredLlmScore, List<AuditResponse.Risk> risks) {
+        int crit = 0, high = 0, mid = 0, low = 0;
         if (risks != null) {
             for (AuditResponse.Risk r : risks) {
-                String sev = r.severity() == null ? "" : r.severity();
-                if ("CRITICAL".equals(sev)) critical = true;
-                else if ("HIGH".equals(sev)) high = true;
-                else if ("MEDIUM".equals(sev)) medium = true;
+                switch (severityRank(r.severity())) {
+                    case 4 -> crit++;
+                    case 3 -> high++;
+                    case 2 -> mid++;
+                    case 1 -> low++;
+                    default -> { }
+                }
             }
         }
-        int min, max;
-        if (critical) { min = 71; max = 100; }
-        else if (high) { min = 46; max = 70; }
-        else if (medium) { min = 21; max = 45; }
-        else { min = 0; max = 20; }
-        return Math.max(min, Math.min(max, score));
+        int raw = crit * 45 + high * 28 + mid * 8 + low * 3;
+        if (crit > 0) return Math.max(71, Math.min(100, raw));   // kritik → kırmızı bant
+        if (high > 0) return Math.max(46, Math.min(100, raw));   // yüksek → turuncu bant
+        if (mid > 0) return Math.max(21, Math.min(70, raw));     // orta → sarı bant
+        return Math.max(5, Math.min(20, raw));                   // sadece düşük/temiz → yeşil bant
     }
 
     private String languageInstruction(String language) {
