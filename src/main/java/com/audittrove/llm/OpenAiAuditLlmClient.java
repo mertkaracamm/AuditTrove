@@ -166,9 +166,18 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                     (a) operating profit or net income down by roughly 20% or more year over year
                     (a ~50% drop in operating profit is ALWAYS its own finding, never only a summary line);
                     (b) a major expense line (finance, marketing/selling, or general-admin) up by roughly
-                    20% or more year over year;
+                    20% or more year over year (increase only — see direction rule below);
                     (c) gross margin or EBITDA margin materially down; (d) a clear liquidity, leverage,
                     going-concern, or receivable/customer-concentration concern stated in the document.
+                    DIRECTION MUST COME FROM THE TWO FIGURES, NOT FROM THE PERCENT SIGN OR WORDING. Before
+                    calling any line item an increase or a decrease, compare the prior-period value with the
+                    current-period value: if the current figure is SMALLER than the prior figure, it is a
+                    DECREASE (even if the document prints the percent in parentheses or without a minus sign),
+                    and if it is LARGER, it is an INCREASE. A percent like "%24,1" or "(%24,1)" tells you the
+                    magnitude, not the direction — derive direction only from the two amounts. A DECREASE in
+                    an expense (e.g. finance expenses falling from 19.917 to 15.114) is favorable and is NEVER
+                    a finding; it may be noted in the summary but must not appear as an attention point, and a
+                    finding's title/evidence must never say "increase/artış" for a figure that actually fell.
                     Each qualifying line item is its own finding. Different line items are NEVER merged into
                     one finding (e.g. an operating-profit decline and an expense increase are two findings,
                     not one), and a single line item is NEVER split into several findings. The resulting set
@@ -393,6 +402,63 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return chunks;
     }
 
+    // "artis/increase" diyen ama kanittaki iki tutardan ikincisi birincisinden KUCUK olan
+    // (yani gercekte DUSEN) bulgulari yakalar. Boyle bir bulgu yanlis yonludur ve azalan bir
+    // gider dikkat noktasi degildir — rapordan cikarilir. Dil bagimsiz (artis|increase|rose|up
+    // + arti|azal|dus|decrease|fell). Yalnizca "artis" iddiasi + "dusus" gercegi celiskisinde eler;
+    // emin olunamayan durumda (iki net tutar yoksa) DOKUNMAZ, bulgu korunur.
+    private static final Pattern INCREASE_WORD = Pattern.compile(
+            "art\\u0131[\\u015fs]|artm\\u0131[\\u015fs]|increase|increased|rose|\\bup\\b|higher|y[\\u00fcu]ksel",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern DECREASE_WORD = Pattern.compile(
+            "azal|d[\\u00fcu][\\u015fs]|decreas|declin|fell|lower|geriled",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final Pattern AMOUNT_SCALED = Pattern.compile(
+            "(\\d[\\d.,]*)\\s*(?:milyon|million|milyar|billion|bin|TL|\\u20ba)",
+            Pattern.CASE_INSENSITIVE);
+
+    private boolean contradictsDirection(AuditResponse.Risk risk) {
+        if (risk == null) return false;
+        String text = ((risk.title() == null ? "" : risk.title()) + " "
+                + (risk.evidence() == null ? "" : risk.evidence()));
+        boolean saysIncrease = INCREASE_WORD.matcher(text).find();
+        boolean saysDecrease = DECREASE_WORD.matcher(text).find();
+        // Yalnizca "artis" iddiasi varken (ve net bir dusus ifadesi yokken) rakamlara bak.
+        if (!saysIncrease || saysDecrease) return false;
+        String ev = risk.evidence() == null ? "" : risk.evidence();
+        // SADECE para/olcek kelimesiyle biten tutarlari al (or. "19.917,1 milyon TL").
+        // Boylece yuzdeler (%24,1) ve ceyrek etiketleri (2C25/2Q26) tutar sanilmaz.
+        Matcher m = AMOUNT_SCALED.matcher(ev);
+        Double first = null, second = null;
+        while (m.find()) {
+            Double v = parseAmount(m.group(1));
+            if (v == null) continue;
+            if (first == null) { first = v; }
+            else { second = v; break; }
+        }
+        // Iki net tutar yoksa emin degiliz — dokunma, bulguyu koru.
+        if (first == null || second == null) return false;
+        // "artis" deniyor ama ikinci tutar birinciden kucukse => gercekte dusus => celiski.
+        return second < first;
+    }
+
+    // Turkce/Ingilizce tutari sayiya cevirir. Binlik "." ve ondalik "," (TR) ya da tam tersi (EN)
+    // olabilir; en sagdaki ayirici ondalik kabul edilir, digerleri binlik olarak atilir.
+    private static Double parseAmount(String tok) {
+        if (tok == null) return null;
+        String t = tok.trim();
+        int lastComma = t.lastIndexOf(','), lastDot = t.lastIndexOf('.');
+        int dec = Math.max(lastComma, lastDot);
+        try {
+            if (dec < 0) return Double.parseDouble(t.replaceAll("[.,]", ""));
+            String intPart = t.substring(0, dec).replaceAll("[.,]", "");
+            String frac = t.substring(dec + 1).replaceAll("[^0-9]", "");
+            return Double.parseDouble(intPart + "." + frac);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     private int severityRank(String severity) {
         if (severity == null) return 0;
         return switch (severity.toUpperCase()) {
@@ -482,6 +548,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         for (AuditResponse.Risk risk : response.risks()) {
             if (lock != null && lock.violatesLock(risk.evidence())) {
                 continue; // yanlis standarttan gelen bulgu — rapordan cikar
+            }
+            if (contradictsDirection(risk)) {
+                continue; // "artis" diyor ama rakamlar dususu gosteriyor — yanlis yonlu bulgu, cikar
             }
             List<Integer> found = groundPages(risk.evidence(), pages);
             if (found.isEmpty()) {
