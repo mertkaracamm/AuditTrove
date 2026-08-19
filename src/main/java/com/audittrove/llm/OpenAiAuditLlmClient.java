@@ -158,14 +158,21 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                     were the chosen standard's number). Quote percentages exactly as they appear in the chosen
                     standard's table.
                     Deterministic finding selection (financial): decide findings from the numbers, not
-                    from tone, so the same report always yields the same findings in any language. Create
-                    exactly ONE finding for each of these when present (MEDIUM unless it clearly signals
-                    going-concern/liquidity risk, then HIGH):
-                    (a) operating profit or net income down by roughly 20% or more year over year;
+                    from tone, so the same report always yields the same findings in any language. For each
+                    condition below that is present in the document you MUST emit exactly one finding — these
+                    are mandatory and may never be omitted, downgraded to a summary sentence, or dropped
+                    because the output language differs. Emit MEDIUM unless it clearly signals
+                    going-concern/liquidity risk, then HIGH:
+                    (a) operating profit or net income down by roughly 20% or more year over year
+                    (a ~50% drop in operating profit is ALWAYS its own finding, never only a summary line);
                     (b) a major expense line (finance, marketing/selling, or general-admin) up by roughly
                     20% or more year over year;
                     (c) gross margin or EBITDA margin materially down; (d) a clear liquidity, leverage,
                     going-concern, or receivable/customer-concentration concern stated in the document.
+                    Each qualifying line item is its own finding. Different line items are NEVER merged into
+                    one finding (e.g. an operating-profit decline and an expense increase are two findings,
+                    not one), and a single line item is NEVER split into several findings. The resulting set
+                    of findings must be identical whether the output is Turkish or English.
                     ROUTINE financing and corporate actions are NOT findings on their own: issuing or
                     redeeming bonds/commercial paper/sukuk/loans at market terms, dividend distributions,
                     capital increases in subsidiaries, buybacks, or scheduled maturities. Mention them in
