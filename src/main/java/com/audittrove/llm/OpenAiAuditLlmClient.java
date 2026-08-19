@@ -15,8 +15,11 @@ import org.springframework.web.client.ResourceAccessException;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Locale;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -742,6 +745,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                                         + (m.note() == null ? "" : m.note())))
                         .map(this::cleanMetric)
                         .toList();
+        // Ayni metrigin iki formatla iki kart olmasini engelle
+        // (or. "3.523 milyar TL" + "TL 3,5 trilyon" ayni deger).
+        cleanMetrics = dedupeMetrics(cleanMetrics);
 
         return new AuditResponse(calibratedScore, rationale, summary,
                 groundedRisks, response.recommendations(), cleanMetrics,
@@ -766,6 +772,132 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             return new AuditResponse.KeyMetric(m.label(), cleaned, m.note());
         }
         return m;
+    }
+
+    // ---- keyMetrics tekillestirme (deterministik) ----
+    // LLM ayni degeri iki formatla iki kart yapabiliyor ("3.523 milyar TL" + "TL 3,5 trilyon").
+    // Kural: (a) etiketler kanonik olarak ayniysa kopya; (b) ikisi de buyuk parasal deger
+    // (>= 100 bin) tasiyip carpan sozcugu cozuldukten sonra %2 tolerans icinde ayni buyuklukse
+    // kopya; (c) yuzde degerleri ancak sayi AYNEN esit VE etiketler ortak kelime paylasirsa
+    // kopya (iki farkli oranin tesadufen ayni cikmasi mumkun, agresif eleme yanlis olur).
+    // Kopyalardan hane sayisi fazla (daha hassas) olan tutulur; esitlikte ilk gelen kalir.
+    private List<AuditResponse.KeyMetric> dedupeMetrics(List<AuditResponse.KeyMetric> metrics) {
+        if (metrics == null || metrics.size() < 2) return metrics;
+        List<AuditResponse.KeyMetric> kept = new ArrayList<>();
+        for (AuditResponse.KeyMetric m : metrics) {
+            int dupIdx = -1;
+            for (int i = 0; i < kept.size(); i++) {
+                if (isDuplicateMetric(kept.get(i), m)) {
+                    dupIdx = i;
+                    break;
+                }
+            }
+            if (dupIdx < 0) {
+                kept.add(m);
+            } else if (precisionDigits(m) > precisionDigits(kept.get(dupIdx))) {
+                kept.set(dupIdx, m);
+            }
+        }
+        return kept;
+    }
+
+    private boolean isDuplicateMetric(AuditResponse.KeyMetric a, AuditResponse.KeyMetric b) {
+        // (a) Etiketler kanonik olarak ayni ("Net Kâr" vs "net kar")
+        String la = canonLabel(a.label());
+        String lb = canonLabel(b.label());
+        if (!la.isEmpty() && la.equals(lb)) return true;
+
+        String va = a.value() == null ? "" : a.value();
+        String vb = b.value() == null ? "" : b.value();
+
+        // (c) Yuzde: sayi aynen esit + etiketlerde ortak kelime
+        Set<String> pa = canonPercents(va);
+        Set<String> pb = canonPercents(vb);
+        if (!pa.isEmpty() && pa.equals(pb) && sharesLabelToken(la, lb)) return true;
+
+        // (b) Parasal buyukluk: carpan cozulmus deger %2 tolerans icinde esit
+        double ma = magnitude(va);
+        double mb = magnitude(vb);
+        if (ma >= 100_000 && mb >= 100_000) {
+            double rel = Math.abs(ma - mb) / Math.max(ma, mb);
+            return rel <= 0.02;
+        }
+        return false;
+    }
+
+    // Etiketi kanonik hale getir: kucuk harf, Turkce aksan sadelestirme, noktalama disi
+    private static String canonLabel(String label) {
+        if (label == null) return "";
+        String s = label.toLowerCase(Locale.forLanguageTag("tr"))
+                .replace('\u0131', 'i').replace('\u00e7', 'c').replace('\u011f', 'g')
+                .replace('\u00f6', 'o').replace('\u015f', 's').replace('\u00fc', 'u')
+                .replace('\u00e2', 'a').replace('\u00ee', 'i').replace('\u00fb', 'u');
+        return s.replaceAll("[^a-z0-9 ]", " ").replaceAll("\\s{2,}", " ").trim();
+    }
+
+    private static boolean sharesLabelToken(String canonA, String canonB) {
+        if (canonA.isEmpty() || canonB.isEmpty()) return false;
+        Set<String> ta = new HashSet<>(Arrays.asList(canonA.split(" ")));
+        for (String t : canonB.split(" ")) {
+            if (t.length() >= 3 && ta.contains(t)) return true;
+        }
+        return false;
+    }
+
+    // Deger metnindeki ilk sayiyi ve pesindeki carpan sozcugunu (bin/milyon/milyar/trilyon,
+    // thousand/million/billion/trillion) cozup mutlak buyukluge cevirir. Sayi yoksa -1.
+    private static final Pattern METRIC_NUM = Pattern.compile(
+            "(\\d{1,3}(?:\\.\\d{3})+(?:,\\d+)?|\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?|\\d+[.,]\\d+|\\d+)");
+    private static final Pattern METRIC_MULT = Pattern.compile(
+            "\\b(bin|milyon|milyar|trilyon|thousand|million|billion|trillion)\\b",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+
+    private static double magnitude(String value) {
+        if (value == null || value.isBlank()) return -1;
+        // Yuzdeler parasal buyukluk degildir
+        String v = PERCENT_ANY.matcher(value).replaceAll(" ");
+        Matcher num = METRIC_NUM.matcher(v);
+        if (!num.find()) return -1;
+        double d = parseFlexibleNumber(num.group(1));
+        if (d < 0) return -1;
+        Matcher mult = METRIC_MULT.matcher(v.substring(num.end()));
+        if (mult.find()) {
+            switch (mult.group(1).toLowerCase(Locale.ROOT)) {
+                case "bin", "thousand" -> d *= 1e3;
+                case "milyon", "million" -> d *= 1e6;
+                case "milyar", "billion" -> d *= 1e9;
+                case "trilyon", "trillion" -> d *= 1e12;
+            }
+        }
+        return d;
+    }
+
+    // TR ("3.523,4") ve EN ("3,523.4") binlik/ondalik desenlerini birlikte cozer.
+    // Tek ayiricili belirsiz durumda ("3.523") 3 haneli grup binlik sayilir (TR yaygin),
+    // 1-2 haneli kuyruk ondaliktir ("3,5" -> 3.5).
+    private static double parseFlexibleNumber(String raw) {
+        try {
+            String s = raw.trim();
+            boolean dotGroups = s.matches("\\d{1,3}(\\.\\d{3})+(,\\d+)?");
+            boolean commaGroups = s.matches("\\d{1,3}(,\\d{3})+(\\.\\d+)?");
+            if (dotGroups) {
+                s = s.replace(".", "").replace(',', '.');
+            } else if (commaGroups) {
+                s = s.replace(",", "");
+            } else {
+                s = s.replace(',', '.');
+            }
+            return Double.parseDouble(s);
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    private static int precisionDigits(AuditResponse.KeyMetric m) {
+        if (m == null || m.value() == null) return 0;
+        Matcher num = METRIC_NUM.matcher(m.value());
+        if (!num.find()) return 0;
+        return num.group(1).replaceAll("\\D", "").length();
     }
 
     // ---- Standart kilidi (deterministik) ----
