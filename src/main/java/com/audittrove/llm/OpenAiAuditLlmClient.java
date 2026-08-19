@@ -459,6 +459,115 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
     }
 
+    // ===== DETERMINISTIK FINANSAL BULGU MOTORU =====
+    // Finansal raporun kar/zarar tablosunu KODLA parse eder ve bulgulari LLM'e biraktirmadan
+    // TUTARLARDAN uretir. Boylece ayni belge her dilde, her calistirmada BIREBIR AYNI bulgu
+    // setini verir. Tablo parse edilemezse bos doner (LLM bulgulari korunur).
+    // Kurallar: kar kalemi (esas faaliyet kari / donem kari) >=%20 DUSTUYSE bulgu;
+    // gider kalemi (pazarlama, genel yonetim, finansman) >=%20 ARTTIYSA bulgu.
+    // Yon her zaman iki tutardan hesaplanir (yazidan/yuzde isaretinden degil): azalan gider
+    // veya artan kar bulgu DEGILDIR.
+    private static final double FINDING_THRESHOLD = 20.0;
+
+    private record LineItem(String label, boolean profit, String trName, String enName) {}
+    private static final List<LineItem> PL_ITEMS = List.of(
+            new LineItem("Esas Faaliyet Kar\u0131", true,  "Esas faaliyet k\u00e2r\u0131", "Operating profit"),
+            new LineItem("D\u00f6nem Kar\u0131", true,      "D\u00f6nem k\u00e2r\u0131", "Net income"),
+            new LineItem("Pazarlama ve sat\u0131\u015f giderleri", false, "Pazarlama ve sat\u0131\u015f giderleri", "Marketing and sales expenses"),
+            new LineItem("Pazarlama giderleri", false, "Pazarlama giderleri", "Marketing expenses"),
+            new LineItem("Genel y\u00f6netim giderleri", false, "Genel y\u00f6netim giderleri", "General administrative expenses"),
+            new LineItem("Finansman giderleri", false, "Finansman giderleri", "Finance expenses"));
+
+    private List<AuditResponse.Risk> deterministicFinancialFindings(String documentText, String language) {
+        List<AuditResponse.Risk> out = new ArrayList<>();
+        if (documentText == null) return out;
+        // Secilen standardin bolgesi: iki standart varsa belgede ONCE geleni sec, aksi halde tum metin.
+        Matcher th = TMS_HEADER.matcher(documentText);
+        Matcher ih = IFRS_HEADER.matcher(documentText);
+        boolean hasTms = th.find(), hasIfrs = ih.find();
+        String region;
+        if (hasTms && hasIfrs) {
+            int a = Math.min(th.start(), ih.start());
+            int b = Math.max(th.start(), ih.start());
+            region = documentText.substring(a, b);
+        } else {
+            region = documentText;
+        }
+        boolean en = "en".equalsIgnoreCase(language);
+        java.util.Set<String> seen = new LinkedHashSet<>();
+        for (LineItem it : PL_ITEMS) {
+            Matcher m = Pattern.compile("(?m)^\\s*" + Pattern.quote(it.label())
+                    + "\\s+\\(?([\\d.]+,\\d+)\\)?\\s+\\(?([\\d.]+,\\d+)\\)?").matcher(region);
+            if (!m.find()) continue;
+            Double prev = plNum(m.group(1)), cur = plNum(m.group(2));
+            if (prev == null || cur == null || prev == 0) continue;
+            String key = en ? it.enName() : it.trName();
+            if (!seen.add(key)) continue; // ayni kalem iki etiketle eslesirse tek kez
+            double change = (cur - prev) / Math.abs(prev) * 100.0;
+            boolean down = cur < prev;
+            if (it.profit() && down && Math.abs(change) >= FINDING_THRESHOLD) {
+                out.add(profitFinding(it, prev, cur, Math.abs(change), en));
+            } else if (!it.profit() && !down && change >= FINDING_THRESHOLD) {
+                out.add(expenseFinding(it, prev, cur, change, en));
+            }
+        }
+        return out;
+    }
+
+    private AuditResponse.Risk profitFinding(LineItem it, double prev, double cur, double pct, boolean en) {
+        String name = en ? it.enName() : it.trName();
+        String title = en ? name + " declined by " + fmtPct(pct, true)
+                          : name + " " + fmtPct(pct, false) + " oran\u0131nda d\u00fc\u015ft\u00fc";
+        String ev = en
+                ? name + " fell from " + fmtNum(prev, true) + " million TL to " + fmtNum(cur, true)
+                  + " million TL, a " + fmtPct(pct, true) + " decrease."
+                : name + " " + fmtNum(prev, false) + " milyon TL'den " + fmtNum(cur, false)
+                  + " milyon TL'ye " + fmtPct(pct, false) + " oran\u0131nda d\u00fc\u015fm\u00fc\u015ft\u00fcr.";
+        return new AuditResponse.Risk(title, "MEDIUM", ev, ev);
+    }
+
+    private AuditResponse.Risk expenseFinding(LineItem it, double prev, double cur, double pct, boolean en) {
+        String name = en ? it.enName() : it.trName();
+        String title = en ? name + " increased by " + fmtPct(pct, true)
+                          : name + " " + fmtPct(pct, false) + " oran\u0131nda artt\u0131";
+        String ev = en
+                ? name + " increased from " + fmtNum(prev, true) + " million TL to " + fmtNum(cur, true)
+                  + " million TL, a " + fmtPct(pct, true) + " increase."
+                : name + " " + fmtNum(prev, false) + " milyon TL'den " + fmtNum(cur, false)
+                  + " milyon TL'ye " + fmtPct(pct, false) + " oran\u0131nda artm\u0131\u015ft\u0131r.";
+        return new AuditResponse.Risk(title, "MEDIUM", ev, ev);
+    }
+
+    private static Double plNum(String s) {
+        if (s == null) return null;
+        String t = s.replace("(", "").replace(")", "").replace(".", "").replace(",", ".");
+        try { return Double.parseDouble(t); } catch (NumberFormatException e) { return null; }
+    }
+
+    // Sayiyi dile gore bicimlendirir. EN: binlik ',' ondalik '.'  TR: binlik '.' ondalik ','
+    private static String fmtNum(double v, boolean en) {
+        long whole = (long) Math.floor(Math.abs(v));
+        int frac = (int) Math.round((Math.abs(v) - whole) * 10);
+        if (frac == 10) { whole += 1; frac = 0; }
+        String grp = String.format(en ? "%,d" : "%,d", whole);
+        if (en) {
+            grp = String.format("%,d", whole); // 26,211
+        } else {
+            grp = String.format("%,d", whole).replace(",", "."); // 26.211
+        }
+        String dec = en ? "." : ",";
+        return grp + dec + frac;
+    }
+
+    private static String fmtPct(double p, boolean en) {
+        double r = Math.round(p * 10) / 10.0;
+        long whole = (long) r;
+        int frac = (int) Math.round((r - whole) * 10);
+        String num = (en ? whole + "." + frac : whole + "," + frac);
+        return en ? num + "%" : "%" + num;
+    }
+    // ===== /DETERMINISTIK FINANSAL BULGU MOTORU =====
+
     private int severityRank(String severity) {
         if (severity == null) return 0;
         return switch (severity.toUpperCase()) {
@@ -522,6 +631,15 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private AuditResponse postProcess(AuditResponse response, List<RegulationChunk> context,
                                       String documentText, String language,
                                       boolean truncated, int totalPages, int includedPages) {
+        // 0) Deterministik finansal bulgu motoru: kar/zarar tablosu parse edilebiliyorsa
+        //    bulgulari KODLA uret (LLM'e biraktirma). Ayni belge -> her dilde birebir ayni
+        //    bulgu seti -> ayni skor. Parse edilemezse (finansal degilse) LLM bulgulari kalir.
+        List<AuditResponse.Risk> deterministic = deterministicFinancialFindings(documentText, language);
+        if (!deterministic.isEmpty()) {
+            response = new AuditResponse(response.riskScore(), response.scoreRationale(),
+                    response.summary(), deterministic, response.recommendations(),
+                    response.keyMetrics(), response.advisorQuestions(), response.references());
+        }
         // 1) Mevzuat referansları (yalnizca RAG baglami varsa filtrele/uret)
         List<AuditResponse.Reference> references = response.references();
         if (!context.isEmpty()) {
