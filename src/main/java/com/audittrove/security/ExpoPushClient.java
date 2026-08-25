@@ -10,6 +10,8 @@ import java.util.Map;
 
 /**
  * Expo Push servisine bildirim gonderir. Hata olsa da inceleme akisini bozmaz (sessiz loglar).
+ * Not: Expo push API hatalari da HTTP 200 ile doner; gercek sonuc yanit govdesindedir
+ * (or. DeviceNotRegistered, InvalidCredentials). Bu yuzden govde loglanir.
  */
 @Component
 public class ExpoPushClient {
@@ -19,10 +21,11 @@ public class ExpoPushClient {
 
     public void send(String expoToken, String title, String body) {
         if (expoToken == null || expoToken.isBlank()) {
+            log.warn("Expo push atlandi: token bos");
             return;
         }
         try {
-            client.post()
+            String response = client.post()
                     .uri(ENDPOINT)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Map.of(
@@ -31,7 +34,12 @@ public class ExpoPushClient {
                             "body", body,
                             "sound", "default"))
                     .retrieve()
-                    .toBodilessEntity();
+                    .body(String.class);
+            if (response != null && response.contains("\"error\"")) {
+                log.warn("Expo push hata yaniti: {}", response);
+            } else {
+                log.info("Expo push gonderildi, yanit: {}", response);
+            }
         } catch (Exception e) {
             log.warn("Expo push gonderilemedi: {}", e.getMessage());
         }
