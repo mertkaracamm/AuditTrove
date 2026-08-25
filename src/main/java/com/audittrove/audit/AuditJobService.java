@@ -66,8 +66,11 @@ public class AuditJobService {
         try {
             String token = pushTokenStore.get(job.deviceId());
             if (token == null) {
+                log.warn("Push token kayitli degil, bildirim atlandi (job {}, device {})",
+                        job.id(), job.deviceId());
                 return;
             }
+            log.info("Push gonderiliyor (job {})", job.id());
             boolean turkish = !"en".equalsIgnoreCase(job.language());
             // Dosya adi push metninde KULLANILMIYOR: multipart'tan gelen ad Turkce karakterlerde
             // bozuk/percent-encoded olabiliyor (or. "%C3%87"). Genel, encoding-guvenli mesaj veriyoruz.
