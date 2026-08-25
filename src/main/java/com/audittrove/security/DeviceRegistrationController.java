@@ -13,12 +13,17 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.Map;
 
 @RestController
 @RequestMapping("/api/v1")
 @Tag(name = "Device Registration")
 public class DeviceRegistrationController {
+
+    private static final Logger log = LoggerFactory.getLogger(DeviceRegistrationController.class);
 
     private final DeviceTokenService tokenService;
     private final PushTokenStore pushTokenStore;
@@ -54,7 +59,15 @@ public class DeviceRegistrationController {
                                                   HttpServletRequest request) {
         String deviceId = (String) request.getAttribute(MobileAuthFilter.DEVICE_ID_ATTR);
         if (deviceId != null) {
-            pushTokenStore.put(deviceId, body.get("pushToken"));
+            String pushToken = body.get("pushToken");
+            if (pushToken != null && !pushToken.isBlank()) {
+                pushTokenStore.put(deviceId, pushToken);
+                log.info("Push token kaydedildi (device {})", deviceId);
+            } else {
+                // Mobil taraf token uretemedi; sebebi teshis icin loglanir, store'a dokunulmaz.
+                log.warn("Cihaz push token uretemedi (device {}): {}",
+                        deviceId, body.getOrDefault("error", "sebep bildirilmedi"));
+            }
         }
         return ResponseEntity.ok().build();
     }
