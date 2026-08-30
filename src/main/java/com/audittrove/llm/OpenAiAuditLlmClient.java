@@ -1341,9 +1341,26 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         List<AuditResponse.Risk> a = secondaries.get(0);
         List<AuditResponse.Risk> b = secondaries.get(1);
 
-        int verified = 0;
-        for (AuditResponse.Risk p : primaryRisks) {
-            if (findMatch(p, a) != null || findMatch(p, b) != null) verified++;
+        // KONSENSUS OYLAMASI: bir LLM bulgusu ancak en az 2 modelin gordugu bulguysa rapora girer.
+        // Bos donen (basarisiz/katkisiz) ikincil oy kullanamaz; hic oylayan yoksa oylama atlanir
+        // (tek modele kalmis isi fakirlestirmeyelim). Deterministik finansal motor bulgulari bu
+        // asamadan SONRA (postProcess'te) eklendigi icin oylamadan muaftir — her zaman kalir.
+        List<List<AuditResponse.Risk>> voters = new ArrayList<>();
+        if (a != null && !a.isEmpty()) voters.add(a);
+        if (b != null && !b.isEmpty()) voters.add(b);
+
+        List<AuditResponse.Risk> kept = new ArrayList<>();
+        int dropped = 0;
+        if (voters.isEmpty()) {
+            kept.addAll(primaryRisks);
+        } else {
+            for (AuditResponse.Risk p : primaryRisks) {
+                boolean voted = false;
+                for (List<AuditResponse.Risk> v : voters) {
+                    if (findMatch(p, v) != null) { voted = true; break; }
+                }
+                if (voted) kept.add(p); else dropped++;
+            }
         }
 
         List<AuditResponse.Risk> additions = new ArrayList<>();
@@ -1359,10 +1376,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                     chosen.finding(), chosen.evidence()));
             if (additions.size() >= 3) break;
         }
-        log.info("Capraz kontrol ozeti: birincil={} bulgu, ikincillerce dogrulanan={}, eklenen={}",
-                primaryRisks.size(), verified, additions.size());
-        if (additions.isEmpty()) return primary;
-        List<AuditResponse.Risk> merged = new ArrayList<>(primaryRisks);
+        log.info("Konsensus ozeti: birincil={} bulgu, tutulan={}, elenen={}, eklenen={}",
+                primaryRisks.size(), kept.size(), dropped, additions.size());
+        if (dropped == 0 && additions.isEmpty()) return primary;
+        List<AuditResponse.Risk> merged = new ArrayList<>(kept);
         merged.addAll(additions);
         return new AuditResponse(primary.riskScore(), primary.scoreRationale(), primary.summary(),
                 merged, primary.recommendations(), primary.keyMetrics(), primary.advisorQuestions(),
