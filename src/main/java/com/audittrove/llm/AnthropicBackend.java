@@ -46,7 +46,6 @@ public class AnthropicBackend implements SecondaryBackend {
         Map<String, Object> body = Map.of(
                 "model", model,
                 "max_tokens", 8192,
-                "temperature", 0,
                 "system", systemContent,
                 "messages", List.of(Map.of("role", "user", "content", userContent)));
         JsonNode response = restClient.post()

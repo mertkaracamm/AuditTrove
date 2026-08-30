@@ -21,7 +21,7 @@ public class GeminiBackend implements SecondaryBackend {
 
     public GeminiBackend(RestClient.Builder builder,
                          @Value("${GEMINI_API_KEY:}") String apiKey,
-                         @Value("${AUDITTROVE_GEMINI_MODEL:gemini-2.5-flash}") String model,
+                         @Value("${AUDITTROVE_GEMINI_MODEL:gemini-3.6-flash}") String model,
                          @Value("${audittrove.openai.timeout-seconds:90}") int timeoutSeconds) {
         this.apiKey = apiKey == null ? "" : apiKey.trim();
         this.model = model;
