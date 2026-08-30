@@ -1302,7 +1302,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
         AuditResponse primary = auditSingle(documentText, context, language, documentType);
         try {
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(150, TimeUnit.SECONDS);
+            // Ikincillere sure tavani: bitmeyenler o turda atlanir, is asla surunmez.
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(45, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            log.warn("Capraz kontrol sure tavanina takildi (45 sn) — geciken ikinciller bu turda atlaniyor");
         } catch (Exception e) {
             log.warn("Capraz kontrol beklenirken sorun: {}", e.toString());
         }
