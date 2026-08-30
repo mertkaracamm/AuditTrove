@@ -21,7 +21,7 @@ public class AnthropicBackend implements SecondaryBackend {
 
     public AnthropicBackend(RestClient.Builder builder,
                             @Value("${ANTHROPIC_API_KEY:}") String apiKey,
-                            @Value("${AUDITTROVE_ANTHROPIC_MODEL:claude-sonnet-5}") String model,
+                            @Value("${AUDITTROVE_ANTHROPIC_MODEL:claude-haiku-4-5}") String model,
                             @Value("${audittrove.openai.timeout-seconds:90}") int timeoutSeconds) {
         this.apiKey = apiKey == null ? "" : apiKey.trim();
         this.model = model;

@@ -1175,10 +1175,21 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // YUKSEK skor = temiz/guvenli, DUSUK skor = dikkat. 100'den baslar, bulgular dusurur.
     // Ayni belge (ayni bulgular) her calistirmada AYNI skoru verir.
     // En yuksek onem seviyesi bandi garanti edilir; cumle ve renk de bu banttan turer.
+    // Capraz kontrol eklemeleri bu on ekle isaretlenir; skora DAHIL EDILMEZLER.
+    // Skor yalnizca birincil (OpenAI, temperature 0 + seed) bulgulardan hesaplanir — determinizm korunur.
+    private static final String CROSS_PREFIX_TR = "Çapraz doğrulama: ";
+    private static final String CROSS_PREFIX_EN = "Cross-check: ";
+
+    private static boolean isCrossAddition(AuditResponse.Risk r) {
+        String t = r == null ? null : r.title();
+        return t != null && (t.startsWith(CROSS_PREFIX_TR) || t.startsWith(CROSS_PREFIX_EN));
+    }
+
     private int calibrateScore(int ignoredLlmScore, List<AuditResponse.Risk> risks) {
         int crit = 0, high = 0, mid = 0, low = 0;
         if (risks != null) {
             for (AuditResponse.Risk r : risks) {
+                if (isCrossAddition(r)) continue; // capraz kontrol eklemesi — skora girmez
                 switch (severityRank(r.severity())) {
                     case 4 -> crit++;
                     case 3 -> high++;
@@ -1295,7 +1306,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         } catch (Exception e) {
             log.warn("Capraz kontrol beklenirken sorun: {}", e.toString());
         }
-        return mergeCross(primary, secondaryRisks);
+        return mergeCross(primary, secondaryRisks, language);
     }
 
     private List<AuditResponse.Risk> secondaryAudit(SecondaryBackend backend, String documentText,
@@ -1320,7 +1331,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
     }
 
-    private AuditResponse mergeCross(AuditResponse primary, Map<String, List<AuditResponse.Risk>> secondaryRisks) {
+    private AuditResponse mergeCross(AuditResponse primary, Map<String, List<AuditResponse.Risk>> secondaryRisks, String language) {
         List<AuditResponse.Risk> primaryRisks = primary.risks() == null ? List.of() : primary.risks();
         List<List<AuditResponse.Risk>> secondaries = new ArrayList<>(secondaryRisks.values());
         if (secondaries.size() < 2) return primary;
@@ -1338,7 +1349,11 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             AuditResponse.Risk rb = findMatch(ra, b);
             if (rb == null) continue;
             if (findMatch(ra, additions) != null) continue;
-            additions.add(severityRank(ra.severity()) <= severityRank(rb.severity()) ? ra : rb);
+            AuditResponse.Risk chosen = severityRank(ra.severity()) <= severityRank(rb.severity()) ? ra : rb;
+            String prefix = language != null && language.toLowerCase(Locale.ROOT).startsWith("en")
+                    ? CROSS_PREFIX_EN : CROSS_PREFIX_TR;
+            additions.add(new AuditResponse.Risk(prefix + chosen.title(), chosen.severity(),
+                    chosen.finding(), chosen.evidence()));
             if (additions.size() >= 3) break;
         }
         log.info("Capraz kontrol ozeti: birincil={} bulgu, ikincillerce dogrulanan={}, eklenen={}",
