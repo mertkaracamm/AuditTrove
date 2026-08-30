@@ -30,6 +30,10 @@ import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 @Component
 public class OpenAiAuditLlmClient implements AuditLlmClient {
@@ -201,12 +205,21 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private final String apiKey;
     private final String model;
 
+    // Coklu model capraz kontrol altyapisi
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OpenAiAuditLlmClient.class);
+    private final List<SecondaryBackend> secondaryBackends;
+    private final boolean multiModelEnabled;
+    private final ExecutorService crossCheckExecutor = Executors.newFixedThreadPool(2);
+    private volatile String schemaJsonCache;
+
     public OpenAiAuditLlmClient(ObjectMapper objectMapper,
                                 RestClient.Builder builder,
                                 @Value("${audittrove.openai.api-key:}") String apiKey,
                                 @Value("${audittrove.openai.base-url}") String baseUrl,
                                 @Value("${audittrove.openai.model}") String model,
-                                @Value("${audittrove.openai.timeout-seconds:90}") int timeoutSeconds) {
+                                @Value("${audittrove.openai.timeout-seconds:90}") int timeoutSeconds,
+                                List<SecondaryBackend> secondaryBackends,
+                                @Value("${AUDITTROVE_MULTI_MODEL:false}") boolean multiModelEnabled) {
         this.objectMapper = objectMapper;
         this.apiKey = apiKey;
         this.model = model;
@@ -214,6 +227,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         requestFactory.setConnectTimeout(Duration.ofSeconds(10));
         requestFactory.setReadTimeout(Duration.ofSeconds(timeoutSeconds));
         this.restClient = builder.baseUrl(baseUrl).requestFactory(requestFactory).build();
+        this.secondaryBackends = secondaryBackends;
+        this.multiModelEnabled = multiModelEnabled;
     }
 
     @Override
@@ -227,7 +242,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         if (chunks.size() > 1) {
             return auditChunked(chunks, context, language, documentType, totalPages, includedPages, truncated);
         }
-        AuditResponse single = auditSingle(documentText, context, language, documentType);
+        AuditResponse single = auditSingleCross(documentText, context, language, documentType);
         return postProcess(single, context, documentText, language, false, totalPages, includedPages);
     }
 
@@ -321,7 +336,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         int maxScore = 0;
 
         for (String chunk : chunks) {
-            AuditResponse part = auditSingle(chunk, context, language, documentType);
+            AuditResponse part = auditSingleCross(chunk, context, language, documentType);
             if (part.risks() != null) allRisks.addAll(part.risks());
             if (part.recommendations() != null) allRecommendations.addAll(part.recommendations());
             if (part.keyMetrics() != null) allMetrics.addAll(part.keyMetrics());
@@ -1246,5 +1261,137 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 "required", List.of("riskScore", "scoreRationale", "summary", "risks",
                         "recommendations", "keyMetrics", "advisorQuestions", "references"),
                 "properties", props);
+    }
+
+    // ================= COKLU MODEL CAPRAZ KONTROL =================
+    // Ayni metin birincil (OpenAI) + yapilandirilmis ikincil modellere (Claude, Gemini) paralel gider.
+    // Birlestirme deterministik kurallarla yapilir:
+    //  - Birincil bulgularin TAMAMI korunur (mevcut davranis asla geriye gitmez).
+    //  - Birincilde olmayan bir bulgu YALNIZCA her iki ikincil model de gorduyse eklenir (oy >= 2),
+    //    cagri basina en fazla 3 adet; eklenen bulgunun severity'si ikisinden dusuk olani (temkinli).
+    //  - Skor yine mevcut deterministik hatta (postProcess/calibrate) hesaplanir.
+    //  - Ikincil model hatasi isi ASLA cokertmez; WARN loglanir, kalanla devam edilir.
+
+    private AuditResponse auditSingleCross(String documentText, List<RegulationChunk> context,
+                                           String language, String documentType) {
+        AuditResponse primary = auditSingle(documentText, context, language, documentType);
+        if (!multiModelEnabled) return primary;
+        List<SecondaryBackend> active = secondaryBackends == null ? List.of()
+                : secondaryBackends.stream().filter(SecondaryBackend::configured).toList();
+        if (active.size() < 2) return primary; // oy >= 2 icin iki ikincil sart
+
+        Map<String, List<AuditResponse.Risk>> secondaryRisks = new LinkedHashMap<>();
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        for (SecondaryBackend backend : active) {
+            futures.add(CompletableFuture.runAsync(() -> {
+                List<AuditResponse.Risk> risks = secondaryAudit(backend, documentText, context, language, documentType);
+                synchronized (secondaryRisks) { secondaryRisks.put(backend.name(), risks); }
+            }, crossCheckExecutor));
+        }
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(150, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("Capraz kontrol beklenirken sorun: {}", e.toString());
+        }
+        return mergeCross(primary, secondaryRisks);
+    }
+
+    private List<AuditResponse.Risk> secondaryAudit(SecondaryBackend backend, String documentText,
+                                                    List<RegulationChunk> context, String language, String documentType) {
+        try {
+            String system = SYSTEM_PROMPT + typeInstruction(documentType) + languageInstruction(language)
+                    + "\nRespond with ONLY one JSON object (no markdown fences, no commentary) that validates against this JSON Schema:\n"
+                    + schemaJson();
+            String content = backend.completeJson(system, userPrompt(documentText, context));
+            String json = extractJsonObject(content);
+            if (json.isBlank()) {
+                log.warn("Capraz kontrol {}: bos veya JSON olmayan yanit", backend.name());
+                return List.of();
+            }
+            AuditResponse parsed = objectMapper.readValue(json, AuditResponse.class);
+            List<AuditResponse.Risk> risks = parsed.risks() == null ? List.of() : parsed.risks();
+            log.info("Capraz kontrol {}: {} bulgu", backend.name(), risks.size());
+            return risks;
+        } catch (Exception e) {
+            log.warn("Capraz kontrol {} basarisiz: {}", backend.name(), e.toString());
+            return List.of();
+        }
+    }
+
+    private AuditResponse mergeCross(AuditResponse primary, Map<String, List<AuditResponse.Risk>> secondaryRisks) {
+        List<AuditResponse.Risk> primaryRisks = primary.risks() == null ? List.of() : primary.risks();
+        List<List<AuditResponse.Risk>> secondaries = new ArrayList<>(secondaryRisks.values());
+        if (secondaries.size() < 2) return primary;
+        List<AuditResponse.Risk> a = secondaries.get(0);
+        List<AuditResponse.Risk> b = secondaries.get(1);
+
+        int verified = 0;
+        for (AuditResponse.Risk p : primaryRisks) {
+            if (findMatch(p, a) != null || findMatch(p, b) != null) verified++;
+        }
+
+        List<AuditResponse.Risk> additions = new ArrayList<>();
+        for (AuditResponse.Risk ra : a) {
+            if (findMatch(ra, primaryRisks) != null) continue;
+            AuditResponse.Risk rb = findMatch(ra, b);
+            if (rb == null) continue;
+            if (findMatch(ra, additions) != null) continue;
+            additions.add(severityRank(ra.severity()) <= severityRank(rb.severity()) ? ra : rb);
+            if (additions.size() >= 3) break;
+        }
+        log.info("Capraz kontrol ozeti: birincil={} bulgu, ikincillerce dogrulanan={}, eklenen={}",
+                primaryRisks.size(), verified, additions.size());
+        if (additions.isEmpty()) return primary;
+        List<AuditResponse.Risk> merged = new ArrayList<>(primaryRisks);
+        merged.addAll(additions);
+        return new AuditResponse(primary.riskScore(), primary.scoreRationale(), primary.summary(),
+                merged, primary.recommendations(), primary.keyMetrics(), primary.advisorQuestions(),
+                primary.references());
+    }
+
+    private AuditResponse.Risk findMatch(AuditResponse.Risk r, List<AuditResponse.Risk> list) {
+        if (list == null || list.isEmpty()) return null;
+        Set<String> tokens = riskTokens(r);
+        for (AuditResponse.Risk other : list) {
+            Set<String> ot = riskTokens(other);
+            int shared = 0;
+            for (String t : tokens) if (ot.contains(t)) shared++;
+            int minSize = Math.max(1, Math.min(tokens.size(), ot.size()));
+            if (shared >= 2 && (double) shared / minSize >= 0.25) return other;
+        }
+        return null;
+    }
+
+    private Set<String> riskTokens(AuditResponse.Risk r) {
+        String text = ((r.title() == null ? "" : r.title()) + " " + (r.finding() == null ? "" : r.finding()))
+                .toLowerCase(Locale.ROOT)
+                .replace('\u0131', 'i').replace('\u015f', 's').replace('\u011f', 'g')
+                .replace('\u00e7', 'c').replace('\u00f6', 'o').replace('\u00fc', 'u');
+        Set<String> out = new HashSet<>();
+        for (String t : text.split("[^a-z0-9%]+")) {
+            if (t.length() >= 4) out.add(t);
+        }
+        return out;
+    }
+
+    private String schemaJson() {
+        String cached = schemaJsonCache;
+        if (cached != null) return cached;
+        try {
+            cached = objectMapper.writeValueAsString(responseSchema());
+        } catch (Exception e) {
+            cached = "{}";
+        }
+        schemaJsonCache = cached;
+        return cached;
+    }
+
+    private static String extractJsonObject(String content) {
+        if (content == null) return "";
+        String s = content.trim();
+        int start = s.indexOf('{');
+        int end = s.lastIndexOf('}');
+        if (start < 0 || end <= start) return "";
+        return s.substring(start, end + 1);
     }
 }
