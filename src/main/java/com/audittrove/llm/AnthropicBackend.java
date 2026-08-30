@@ -56,6 +56,14 @@ public class AnthropicBackend implements SecondaryBackend {
                 .body(body)
                 .retrieve()
                 .body(JsonNode.class);
-        return response == null ? "" : response.at("/content/0/text").asText("");
+        if (response == null) return "";
+        JsonNode content = response.at("/content");
+        if (!content.isArray()) return "";
+        StringBuilder sb = new StringBuilder();
+        for (JsonNode block : content) {
+            JsonNode text = block.get("text");
+            if (text != null) sb.append(text.asText());
+        }
+        return sb.toString();
     }
 }
