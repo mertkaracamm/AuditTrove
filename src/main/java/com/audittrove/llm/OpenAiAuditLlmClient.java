@@ -1274,12 +1274,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
     private AuditResponse auditSingleCross(String documentText, List<RegulationChunk> context,
                                            String language, String documentType) {
-        AuditResponse primary = auditSingle(documentText, context, language, documentType);
-        if (!multiModelEnabled) return primary;
+        if (!multiModelEnabled) return auditSingle(documentText, context, language, documentType);
         List<SecondaryBackend> active = secondaryBackends == null ? List.of()
                 : secondaryBackends.stream().filter(SecondaryBackend::configured).toList();
-        if (active.size() < 2) return primary; // oy >= 2 icin iki ikincil sart
+        if (active.size() < 2) return auditSingle(documentText, context, language, documentType); // oy >= 2 icin iki ikincil sart
 
+        // Ikincilleri ONCE baslat: birincil bu is parcaciginda kosarken onlar da paralel calisir.
+        // Toplam sure = max(birincil, en yavas ikincil) — sirali toplamdan cok daha kisa.
         Map<String, List<AuditResponse.Risk>> secondaryRisks = new LinkedHashMap<>();
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         for (SecondaryBackend backend : active) {
@@ -1288,6 +1289,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 synchronized (secondaryRisks) { secondaryRisks.put(backend.name(), risks); }
             }, crossCheckExecutor));
         }
+        AuditResponse primary = auditSingle(documentText, context, language, documentType);
         try {
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(150, TimeUnit.SECONDS);
         } catch (Exception e) {
