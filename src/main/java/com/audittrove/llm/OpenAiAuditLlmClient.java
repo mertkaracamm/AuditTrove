@@ -431,8 +431,11 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private static final Pattern DECREASE_WORD = Pattern.compile(
             "azal|d[\\u00fcu][\\u015fs]|decreas|declin|fell|lower|geriled",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    // Tutar: ya olcek/para SON EKI ile ("19.917,1 milyon TL", "4,148 thousand"),
+    // ya da para birimi ON EKI ile ("TL 4,148", "TRY 1,234.5") yazilmis olabilir (EN raporlar).
     private static final Pattern AMOUNT_SCALED = Pattern.compile(
-            "(\\d[\\d.,]*)\\s*(?:milyon|million|milyar|billion|bin|TL|\\u20ba)",
+            "(\\d[\\d.,]*)\\s*(?:milyon|million|milyar|billion|thousand|bin|TRY|TL|\\u20ba)"
+            + "|(?:TRY|TL|\\u20ba)\\s*(\\d[\\d.,]*)",
             Pattern.CASE_INSENSITIVE);
 
     private boolean contradictsDirection(AuditResponse.Risk risk) {
@@ -449,7 +452,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         Matcher m = AMOUNT_SCALED.matcher(ev);
         Double first = null, second = null;
         while (m.find()) {
-            Double v = parseAmount(m.group(1));
+            String tok = m.group(1) != null ? m.group(1) : m.group(2);
+            Double v = plNum(tok);
             if (v == null) continue;
             if (first == null) { first = v; }
             else { second = v; break; }
@@ -460,22 +464,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return second < first;
     }
 
-    // Turkce/Ingilizce tutari sayiya cevirir. Binlik "." ve ondalik "," (TR) ya da tam tersi (EN)
-    // olabilir; en sagdaki ayirici ondalik kabul edilir, digerleri binlik olarak atilir.
-    private static Double parseAmount(String tok) {
-        if (tok == null) return null;
-        String t = tok.trim();
-        int lastComma = t.lastIndexOf(','), lastDot = t.lastIndexOf('.');
-        int dec = Math.max(lastComma, lastDot);
-        try {
-            if (dec < 0) return Double.parseDouble(t.replaceAll("[.,]", ""));
-            String intPart = t.substring(0, dec).replaceAll("[.,]", "");
-            String frac = t.substring(dec + 1).replaceAll("[^0-9]", "");
-            return Double.parseDouble(intPart + "." + frac);
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
+    // Tutar cozumleme artik tek yerden: plNum (asagida). Eski parseAmount "12,345" gibi
+    // EN binlik bicimini 12.345 sanip guard karsilastirmasini bozuyordu.
 
     // ===== DETERMINISTIK FINANSAL BULGU MOTORU =====
     // Finansal raporun kar/zarar tablosunu KODLA parse eder ve bulgulari LLM'e biraktirmadan
@@ -487,14 +477,26 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // veya artan kar bulgu DEGILDIR.
     private static final double FINDING_THRESHOLD = 20.0;
 
-    private record LineItem(String label, boolean profit, String trName, String enName) {}
+    // matchLabels: belgede satir basinda aranan etiketler — TR VE EN (Ford Otosan vakasi:
+    // Ingilizce belgede TR etiket eslesmedigi icin motor devre disi kaliyor, top LLM'e kaliyordu).
+    private record LineItem(List<String> matchLabels, boolean profit, String trName, String enName) {}
     private static final List<LineItem> PL_ITEMS = List.of(
-            new LineItem("Esas Faaliyet Kar\u0131", true,  "Esas faaliyet k\u00e2r\u0131", "Operating profit"),
-            new LineItem("D\u00f6nem Kar\u0131", true,      "D\u00f6nem k\u00e2r\u0131", "Net income"),
-            new LineItem("Pazarlama ve sat\u0131\u015f giderleri", false, "Pazarlama ve sat\u0131\u015f giderleri", "Marketing and sales expenses"),
-            new LineItem("Pazarlama giderleri", false, "Pazarlama giderleri", "Marketing expenses"),
-            new LineItem("Genel y\u00f6netim giderleri", false, "Genel y\u00f6netim giderleri", "General administrative expenses"),
-            new LineItem("Finansman giderleri", false, "Finansman giderleri", "Finance expenses"));
+            new LineItem(List.of("Esas Faaliyet Kar\u0131", "Operating profit"), true,
+                    "Esas faaliyet k\u00e2r\u0131", "Operating profit"),
+            new LineItem(List.of("D\u00f6nem Kar\u0131", "Profit for the period", "Net profit for the period",
+                    "Net income"), true,
+                    "D\u00f6nem k\u00e2r\u0131", "Net income"),
+            new LineItem(List.of("Pazarlama ve sat\u0131\u015f giderleri", "Marketing and sales expenses",
+                    "Selling and marketing expenses"), false,
+                    "Pazarlama ve sat\u0131\u015f giderleri", "Marketing and sales expenses"),
+            new LineItem(List.of("Pazarlama giderleri", "Marketing expenses"), false,
+                    "Pazarlama giderleri", "Marketing expenses"),
+            new LineItem(List.of("Genel y\u00f6netim giderleri", "General administrative expenses",
+                    "Administrative expenses"), false,
+                    "Genel y\u00f6netim giderleri", "General administrative expenses"),
+            new LineItem(List.of("Finansman giderleri", "Finance expenses", "Finance costs",
+                    "Financial expenses"), false,
+                    "Finansman giderleri", "Finance expenses"));
 
     private List<AuditResponse.Risk> deterministicFinancialFindings(String documentText, String language) {
         List<AuditResponse.Risk> out = new ArrayList<>();
@@ -514,9 +516,18 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         boolean en = "en".equalsIgnoreCase(language);
         java.util.Set<String> seen = new LinkedHashSet<>();
         for (LineItem it : PL_ITEMS) {
-            Matcher m = Pattern.compile("(?m)^\\s*" + Pattern.quote(it.label())
-                    + "\\s+\\(?([\\d.]+,\\d+)\\)?\\s+\\(?([\\d.]+,\\d+)\\)?").matcher(region);
-            if (!m.find()) continue;
+            // Tutar: en az bir ayirici (. veya ,) icermeli — boylece yil (2025) ve not sutunu (5)
+            // tutar sanilmaz. TR "19.917,1" ve EN "12,345.6" / "12,345" bicimlerinin hepsi gecer.
+            // Etiket ile tutarlar arasinda opsiyonel not sutunu (or. "5" ya da "5.1") olabilir.
+            String amt = "\\(?(\\d[\\d.,]*[.,]\\d+)\\)?";
+            Matcher m = null;
+            for (String lbl : it.matchLabels()) {
+                Matcher cand = Pattern.compile("(?m)^\\s*" + Pattern.quote(lbl)
+                        + "\\s+(?:\\d{1,2}(?:\\.\\d{1,2})?\\s+)?" + amt + "\\s+" + amt,
+                        Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE).matcher(region);
+                if (cand.find()) { m = cand; break; }
+            }
+            if (m == null) continue;
             Double prev = plNum(m.group(1)), cur = plNum(m.group(2));
             if (prev == null || cur == null || prev == 0) continue;
             String key = en ? it.enName() : it.trName();
@@ -556,10 +567,31 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return new AuditResponse.Risk(title, "MEDIUM", ev, ev);
     }
 
+    // TR ("19.917,1"), EN ("12,345.6") ve tek-ayiricili bicimleri guvenli cozer:
+    // iki ayirici turu varsa SAGDAKI ondaliktir; tek tur ayirici birden fazla gectiyse ya da
+    // tam 3 hane izliyorsa ("12,345" / "1.234") BINLIKTIR, aksi halde ondaliktir ("74,7").
+    // Parantez (negatif gosterimi) atilir — motor buyukluk/yon icin mutlak degerle calisir.
     private static Double plNum(String s) {
         if (s == null) return null;
-        String t = s.replace("(", "").replace(")", "").replace(".", "").replace(",", ".");
-        try { return Double.parseDouble(t); } catch (NumberFormatException e) { return null; }
+        String t = s.replace("(", "").replace(")", "").trim();
+        boolean hasDot = t.indexOf('.') >= 0, hasComma = t.indexOf(',') >= 0;
+        try {
+            if (hasDot && hasComma) {
+                boolean dotDecimal = t.lastIndexOf('.') > t.lastIndexOf(',');
+                String cleaned = dotDecimal ? t.replace(",", "") : t.replace(".", "").replace(',', '.');
+                return Double.parseDouble(cleaned);
+            }
+            if (hasDot || hasComma) {
+                char sep = hasDot ? '.' : ',';
+                int first = t.indexOf(sep), last = t.lastIndexOf(sep);
+                boolean thousands = first != last || t.length() - last - 1 == 3;
+                if (thousands) return Double.parseDouble(t.replace(String.valueOf(sep), ""));
+                return Double.parseDouble(t.replace(sep, '.'));
+            }
+            return Double.parseDouble(t);
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     // Sayiyi dile gore bicimlendirir. EN: binlik ',' ondalik '.'  TR: binlik '.' ondalik ','
