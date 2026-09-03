@@ -1,33 +1,66 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <link rel="icon" type="image/png" href="/audittrove-icon.png">
-  <title>Privacy Policy | AuditTrove</title>
-  <style>body{max-width:760px;margin:48px auto;padding:0 22px;color:#172033;font:16px/1.65 system-ui,sans-serif}h1,h2{color:#0c6b62}a{color:#0969da}</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Privacy Policy | AuditTrove</title>
+<style>body{max-width:760px;margin:48px auto;padding:0 22px;color:#172033;font:16px/1.65 system-ui,sans-serif}h1,h2{color:#0c6b62}a{color:#0969da}table{border-collapse:collapse;width:100%;margin:12px 0}th,td{border:1px solid #d8dee8;padding:8px 10px;text-align:left;vertical-align:top;font-size:15px}th{background:#f2f6f5}</style>
 </head>
 <body>
 <h1>AuditTrove Privacy Policy</h1>
-<p><strong>Effective date:</strong> August 25, 2026</p>
+<p>Effective date: September 3, 2026</p>
+
+<h2>Where this policy applies</h2>
+<p>AuditTrove is available in two ways: as a mobile app (iOS and Android) and as an app inside ChatGPT (the "ChatGPT App"), where the AuditTrove tool <code>audit_document</code> reviews documents you provide in a ChatGPT conversation. This policy covers both. Where a practice applies to only one of them, this policy says so.</p>
+
+<h2>Data we process</h2>
+<table>
+<tr><th>Category</th><th>Details</th><th>Where</th></tr>
+<tr><td>Document content</td><td>The text extracted from the PDF or image you submit for review.</td><td>Mobile app and ChatGPT App</td></tr>
+<tr><td>File name</td><td>The name of the file you submit, used to label the review.</td><td>Mobile app and ChatGPT App</td></tr>
+<tr><td>Review preferences</td><td>The report language (Turkish or English) and an optional document type hint (general, financial, rental, subscription).</td><td>Mobile app and ChatGPT App</td></tr>
+<tr><td>Review output</td><td>The generated review: a score, a score rationale, a summary, findings with page references, recommendations, key metrics, suggested questions for a professional advisor, and page references. The output contains no identifiers, account data, or technical/debug information.</td><td>Mobile app and ChatGPT App</td></tr>
+<tr><td>Anonymous usage counters</td><td>Per-device counts of reviews (for example, reviews this month) used to enforce free-tier limits and rate limits. Keyed to an anonymous device identifier, not to a name or account.</td><td>Mobile app only</td></tr>
+<tr><td>Subscription status</td><td>Whether a device has an active subscription, verified through our payments provider.</td><td>Mobile app only</td></tr>
+<tr><td>Push token</td><td>An anonymous device token used to notify you when a review is ready.</td><td>Mobile app only</td></tr>
+</table>
+<p>We do not require an account, we do not show ads, and we do not sell your data. In the ChatGPT App we collect no device identifiers, no usage counters, and no subscription data — only the document content, file name, and review preferences that ChatGPT sends to the <code>audit_document</code> tool when you ask for a review.</p>
+
 <h2>What we do with your documents</h2>
-<p>When you submit a document, the text extracted from it is sent to <strong>OpenAI</strong> (OpenAI, L.L.C.), a third-party AI service, solely to generate your review. This transfer happens only after you have given your explicit consent in the app; consent is requested before every review, and nothing is sent if you decline. The extracted text is used only to produce your review and for no other purpose.</p>
-<p>The documents you upload are processed only to produce your review and are not permanently stored on our servers. They are held in memory during analysis and discarded afterward; the resulting review is saved only in your review history on your own device. Under OpenAI's API data usage policy, content sent through the API is not used to train OpenAI's models.</p>
-<h2>Information we collect</h2>
-<p>We collect anonymous, per-device usage counts (for example, the number of reviews) to enforce free-tier limits and operate the service, and your subscription status, verified through our payments provider (RevenueCat), to unlock paid features. We do not require an account, we do not show ads, and we do not sell your data.</p>
-<h2>Third-party services</h2>
-<p>Document analysis is performed by <strong>OpenAI</strong>, a third-party AI service, which receives the text extracted from your document solely to generate your review. OpenAI processes this data under its own privacy policy and API data usage policy, which provide protections equivalent to those described here, including not using API content to train its models. Subscriptions and purchase validation are handled by RevenueCat and your app store. Push notifications letting you know a review is ready are delivered via the Expo push service using an anonymous device token.</p>
+<p>When you submit a document, the text extracted from it is sent to third-party AI providers solely to generate your review. Analysis is performed by OpenAI (OpenAI, L.L.C.); to improve accuracy, findings may additionally be cross-checked by Anthropic (Anthropic, PBC) and Google (Google LLC), which receive the same extracted text for that purpose only. The extracted text is used only to produce your review and for no other purpose. Under these providers' API data usage policies, content sent through their APIs is not used to train their models.</p>
+<p>In the mobile app, this transfer happens only after you have given your explicit consent; consent is requested before every review, and nothing is sent if you decline. In the ChatGPT App, submitting a document to AuditTrove and asking for a review is your instruction to process it; if you do not want a document processed, do not submit it to the tool.</p>
+<p>Documents are processed only to produce your review and are not stored on our servers. They are held in memory during analysis and discarded afterward. In the mobile app, the resulting review is saved only in your review history on your own device. In the ChatGPT App, the review is returned to your ChatGPT conversation and is retained there under OpenAI's own privacy policy; we keep no copy.</p>
+
+<h2>Recipients of your data</h2>
+<ul>
+<li><strong>AI providers:</strong> OpenAI performs the analysis; Anthropic and Google may cross-check findings. Each receives only the extracted document text and review preferences, solely to generate your review, and processes it under its own privacy policy and API data usage terms, which include not using API content to train models.</li>
+<li><strong>RevenueCat</strong> (mobile app only): validates subscriptions and purchases together with your app store.</li>
+<li><strong>Expo</strong> (mobile app only): delivers the push notification that tells you a review is ready, using an anonymous device token.</li>
+<li><strong>Railway</strong>: hosts our servers. Document text passes through this infrastructure in memory during analysis but is not stored there.</li>
+</ul>
+<p>We share data with no other recipients.</p>
+
+<h2>Retention</h2>
+<ul>
+<li><strong>Documents and extracted text:</strong> held in memory only for the duration of the analysis, then discarded. Never written to server storage.</li>
+<li><strong>Review output:</strong> not stored on our servers. Mobile app: kept only in the review history on your device until you clear it or uninstall the app. ChatGPT App: kept in your ChatGPT conversation under OpenAI's policies.</li>
+<li><strong>Anonymous usage counters</strong> (mobile app only): kept for as long as needed to enforce monthly limits, and deleted on request.</li>
+<li><strong>Subscription status and push tokens</strong> (mobile app only): kept while the app is registered with our service.</li>
+</ul>
+
 <h2>Your choices, revoking consent, and deletion</h2>
-<p>Consent to send a document for analysis is requested each time, immediately before the review starts, and applies only to that single review. You can withdraw consent at any moment by tapping Cancel in the consent dialog or simply not submitting a document; no standing consent is stored, so there is nothing further to revoke.</p>
-<p>Documents are not retained on our servers, so there is no server-side copy of your documents to delete. Your review history exists only on your device and can be deleted by clearing it in the app or uninstalling the app. To request deletion of the anonymous per-device usage counters we hold, contact us at <a href="mailto:support@audittrove.com">support@audittrove.com</a>.</p>
-<h2>Your history</h2>
-<p>Your review history is stored locally on your device. Clearing it in the app or uninstalling the app removes it.</p>
+<p>In the mobile app, consent to send a document for analysis is requested each time, immediately before the review starts, and applies only to that single review. You can withdraw consent at any moment by tapping Cancel in the consent dialog or simply not submitting a document; no standing consent is stored, so there is nothing further to revoke. In the ChatGPT App, you control what is processed by choosing what you submit; nothing is processed unless you ask for a review.</p>
+<p>Documents are not retained on our servers, so there is no server-side copy of your documents to delete. Your review history in the mobile app exists only on your device and can be deleted by clearing it in the app or uninstalling the app. Reviews returned in ChatGPT can be managed through ChatGPT's own data controls. To request deletion of the anonymous per-device usage counters we hold, contact us at <a href="mailto:support@audittrove.com">support@audittrove.com</a>.</p>
+
 <h2>Children</h2>
 <p>AuditTrove is not directed to children.</p>
+
 <h2>Changes</h2>
 <p>We may update this policy by publishing a revised version with a new effective date.</p>
+
 <h2>Contact</h2>
 <p>Questions: <a href="mailto:support@audittrove.com">support@audittrove.com</a>.</p>
+
 <p><a href="/">Back to AuditTrove</a></p>
 </body>
 </html>
