@@ -27,8 +27,6 @@ const DECREASE = /azal|düş|decreas|declin|fell|lower|geriled/i;
 
 function detectLang(text) {
   if (!text) return null;
-  // Türkçeye özgü harf iki kez geçiyorsa metin Türkçedir; İngilizce metinde bulunmaz.
-  if ((text.match(/[ğşıİöüçĞŞÖÜÇ]/g) || []).length >= 2) return 'tr';
   let tr = 0, en = 0, words = 0;
   for (const w of text.toLowerCase().split(/[^\p{L}]+/u)) {
     if (!w) continue;
@@ -36,6 +34,8 @@ function detectLang(text) {
     if (TR_WORDS.has(w)) tr++;
     if (EN_WORDS.has(w)) en++;
   }
+  // Küçük harfli Türkçe harfler İngilizce cümlede geçmez; "TÜİK" gibi kısaltmalar sayılmaz.
+  if ((text.match(/[ğşıçöü]/g) || []).length >= 2 && en < 3) return 'tr';
   if (words < 6 || Math.abs(tr - en) < 2) return null;
   return tr > en ? 'tr' : 'en';
 }

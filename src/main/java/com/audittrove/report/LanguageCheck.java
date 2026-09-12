@@ -26,10 +26,6 @@ public final class LanguageCheck {
     /** Metin belirgin şekilde diğer dildeyse o dili, aksi halde null döner (emin değilse susar). */
     public static Lang detect(String text) {
         if (text == null) return null;
-        // Türkçeye özgü harfler İngilizce metinde bulunmaz; iki tane yeterli kanıt.
-        int trLetters = 0;
-        for (char c : text.toCharArray()) if ("ğşıİöüçĞŞÖÜÇ".indexOf(c) >= 0) trLetters++;
-        if (trLetters >= 2) return Lang.TR;
         int tr = 0, en = 0, words = 0;
         for (String w : text.toLowerCase(Locale.forLanguageTag("tr")).split("[^\\p{L}]+")) {
             if (w.isEmpty()) continue;
@@ -37,6 +33,11 @@ public final class LanguageCheck {
             if (TR.contains(w)) tr++;
             if (EN.contains(w)) en++;
         }
+        // Küçük harfli Türkçe harfler (ğ ş ı ç ö ü) İngilizce cümlede geçmez; "TÜİK" gibi büyük harfli
+        // kısaltmalar sayılmaz, çünkü İngilizce metinde de aynen yazılır. İngilizce bağlaç çoksa cümle İngilizcedir.
+        int trLetters = 0;
+        for (char c : text.toCharArray()) if ("ğşıçöü".indexOf(c) >= 0) trLetters++;
+        if (trLetters >= 2 && en < 3) return Lang.TR;
         if (words < MIN_WORDS || Math.abs(tr - en) < MIN_MARGIN) return null;
         return tr > en ? Lang.TR : Lang.EN;
     }

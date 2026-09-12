@@ -53,6 +53,13 @@ class ReportContractTest {
     }
 
     @Test
+    void acronymsAndTurkishNounsDoNotFlipEnglishSentences() {
+        assertThat(LanguageCheck.detect("The contract specifies that the annual rent increase is applied according to the CPI announced by TÜİK.")).isEqualTo(Lang.EN);
+        assertThat(LanguageCheck.detect("Yıllık artış, TÜİK tarafından açıklanan on iki aylık TÜFE ortalaması oranında uygulanır.")).isEqualTo(Lang.TR);
+        assertThat(LanguageCheck.detect("Article 3 states the monthly rent is 42,500 TL, payable in advance by the 5th of each month.")).isEqualTo(Lang.EN);
+    }
+
+    @Test
     void shortOrNumericTextIsNotJudged() {
         assertThat(LanguageCheck.detect("28.984.491 63.551.075")).isNull();
         assertThat(LanguageCheck.detect("Operating profit 2024")).isNull();
