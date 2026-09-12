@@ -1,6 +1,12 @@
 package com.audittrove.llm;
 
 import com.audittrove.api.AuditResponse;
+import com.audittrove.financial.FinancialRuleEngine;
+import com.audittrove.financial.Lang;
+import com.audittrove.financial.LineItemKey;
+import com.audittrove.financial.NumberText;
+import com.audittrove.financial.StatementExtraction;
+import com.audittrove.financial.StatementVerifier;
 import com.audittrove.rag.RegulationChunk;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -243,7 +249,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             return auditChunked(chunks, context, language, documentType, totalPages, includedPages, truncated);
         }
         AuditResponse single = auditSingleCross(documentText, context, language, documentType);
-        return postProcess(single, context, documentText, language, false, totalPages, includedPages);
+        return postProcess(single, context, documentText, language, documentType, false, totalPages, includedPages);
     }
 
     // Tek bir metin blogunu tek LLM cagrisiyla degerlendirir (post-process yapmaz).
@@ -361,7 +367,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
         // Butun belge metnini birlestirip sayfa dogrulama + skor kelepcesi + standart kilidini uygula
         String fullText = String.join("", chunks);
-        AuditResponse processed = postProcess(merged, context, fullText, language, false, totalPages, totalPages);
+        AuditResponse processed = postProcess(merged, context, fullText, language, documentType, false, totalPages, totalPages);
 
         // Cok parcali oldugunu ozete deterministik olarak not dus.
         // Belge tavani astiysa (truncated) "butunuyle" DEME — dogru sekilde kismi inceleme belirt.
@@ -453,7 +459,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         Double first = null, second = null;
         while (m.find()) {
             String tok = m.group(1) != null ? m.group(1) : m.group(2);
-            Double v = plNum(tok);
+            Double v = NumberText.parse(tok);
             if (v == null) continue;
             if (first == null) { first = v; }
             else { second = v; break; }
@@ -464,159 +470,107 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return second < first;
     }
 
-    // Tutar cozumleme artik tek yerden: plNum (asagida). Eski parseAmount "12,345" gibi
-    // EN binlik bicimini 12.345 sanip guard karsilastirmasini bozuyordu.
+    // ===== GELİR TABLOSU: LLM OKUR, KOD KARAR VERİR =====
+    // Çıkarım yerleşimden bağımsızdır (KAP, IFRS, taranmış belge fark etmez); doğrulayıcı belgede
+    // geçmeyen sayıyı geçirmez; yön ve eşik kodda hesaplanır. Yalnızca finansal belge tipinde çalışır.
+    private static final String EXTRACTION_PROMPT = """
+            You extract income statement (profit or loss statement) line items from a document.
+            You READ ONLY: never compute, convert, round, infer or reorder anything.
+            Copy every amount EXACTLY as printed, with the same digits, separators and sign
+            (keep a leading minus or surrounding parentheses if printed).
+            Decide which column is the current period from the column HEADERS (dates or years),
+            never from column position; put the header texts in periods.current / periods.previous.
+            unit: the presentation currency as an ISO code (TRY, USD, EUR...) and the declared scale
+            ("1.000 TL", "TL Thousand", "in thousands" -> thousand; "million" -> million;
+            "billion" -> billion; plain amounts -> units).
+            Prefer the consolidated statement if both consolidated and standalone exist, and the
+            full-period columns if quarterly columns also exist. Include an item only when both the
+            current and the previous period amounts are printed on the same row. For page, use the
+            number inside the nearest preceding [REPORT PAGE n] marker. If there is no income
+            statement, return found=false with empty items.
+            """;
 
-    // ===== DETERMINISTIK FINANSAL BULGU MOTORU =====
-    // Finansal raporun kar/zarar tablosunu KODLA parse eder ve bulgulari LLM'e biraktirmadan
-    // TUTARLARDAN uretir. Boylece ayni belge her dilde, her calistirmada BIREBIR AYNI bulgu
-    // setini verir. Tablo parse edilemezse bos doner (LLM bulgulari korunur).
-    // Kurallar: kar kalemi (esas faaliyet kari / donem kari) >=%20 DUSTUYSE bulgu;
-    // gider kalemi (pazarlama, genel yonetim, finansman) >=%20 ARTTIYSA bulgu.
-    // Yon her zaman iki tutardan hesaplanir (yazidan/yuzde isaretinden degil): azalan gider
-    // veya artan kar bulgu DEGILDIR.
-    private static final double FINDING_THRESHOLD = 20.0;
+    private FinancialRuleEngine.Result financialRules(String documentText, Map<Integer, String> pages,
+                                                      String language, String documentType) {
+        String type = documentType == null ? "financial" : documentType.trim().toLowerCase(Locale.ROOT);
+        if (!type.equals("financial") || pages.isEmpty()) return FinancialRuleEngine.Result.empty();
+        StatementExtraction extraction = extractStatement(documentText);
+        StatementVerifier.VerifiedStatement verified = StatementVerifier.verify(extraction, pages);
+        FinancialRuleEngine.Result result = FinancialRuleEngine.evaluate(verified, Lang.of(language));
+        log.info("Gelir tablosu: cikarilan={} dogrulanan={} bulgu={}",
+                extraction.items().size(), verified.items().size(), result.findings().size());
+        return result;
+    }
 
-    // matchLabels: belgede satir basinda aranan etiketler — TR VE EN (Ford Otosan vakasi:
-    // Ingilizce belgede TR etiket eslesmedigi icin motor devre disi kaliyor, top LLM'e kaliyordu).
-    private record LineItem(List<String> matchLabels, boolean profit, String trName, String enName) {}
-    private static final List<LineItem> PL_ITEMS = List.of(
-            new LineItem(List.of("Esas Faaliyet Kar\u0131", "Operating profit"), true,
-                    "Esas faaliyet k\u00e2r\u0131", "Operating profit"),
-            new LineItem(List.of("D\u00f6nem Kar\u0131", "Profit for the period", "Net profit for the period",
-                    "Net income"), true,
-                    "D\u00f6nem k\u00e2r\u0131", "Net income"),
-            new LineItem(List.of("Pazarlama ve sat\u0131\u015f giderleri", "Marketing and sales expenses",
-                    "Selling and marketing expenses"), false,
-                    "Pazarlama ve sat\u0131\u015f giderleri", "Marketing and sales expenses"),
-            new LineItem(List.of("Pazarlama giderleri", "Marketing expenses"), false,
-                    "Pazarlama giderleri", "Marketing expenses"),
-            new LineItem(List.of("Genel y\u00f6netim giderleri", "General administrative expenses",
-                    "Administrative expenses"), false,
-                    "Genel y\u00f6netim giderleri", "General administrative expenses"),
-            new LineItem(List.of("Finansman giderleri", "Finance expenses", "Finance costs",
-                    "Financial expenses"), false,
-                    "Finansman giderleri", "Finance expenses"));
-
-    private List<AuditResponse.Risk> deterministicFinancialFindings(String documentText, String language) {
-        List<AuditResponse.Risk> out = new ArrayList<>();
-        if (documentText == null) return out;
-        // Secilen standardin bolgesi: iki standart varsa belgede ONCE geleni sec, aksi halde tum metin.
-        Matcher th = TMS_HEADER.matcher(documentText);
-        Matcher ih = IFRS_HEADER.matcher(documentText);
-        boolean hasTms = th.find(), hasIfrs = ih.find();
-        String region;
-        if (hasTms && hasIfrs) {
-            int a = Math.min(th.start(), ih.start());
-            int b = Math.max(th.start(), ih.start());
-            region = documentText.substring(a, b);
-        } else {
-            region = documentText;
-        }
-        boolean en = "en".equalsIgnoreCase(language);
-        java.util.Set<String> seen = new LinkedHashSet<>();
-        for (LineItem it : PL_ITEMS) {
-            // Tutar: en az bir ayirici (. veya ,) icermeli — boylece yil (2025) ve not sutunu (5)
-            // tutar sanilmaz. TR "19.917,1" ve EN "12,345.6" / "12,345" bicimlerinin hepsi gecer.
-            // Etiket ile tutarlar arasinda opsiyonel not sutunu (or. "5" ya da "5.1") olabilir.
-            String amt = "\\(?(\\d[\\d.,]*[.,]\\d+)\\)?";
-            Matcher m = null;
-            for (String lbl : it.matchLabels()) {
-                Matcher cand = Pattern.compile("(?m)^\\s*" + Pattern.quote(lbl)
-                        + "\\s+(?:\\d{1,2}(?:\\.\\d{1,2})?\\s+)?" + amt + "\\s+" + amt,
-                        Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE).matcher(region);
-                if (cand.find()) { m = cand; break; }
-            }
-            if (m == null) continue;
-            Double prev = plNum(m.group(1)), cur = plNum(m.group(2));
-            if (prev == null || cur == null || prev == 0) continue;
-            String key = en ? it.enName() : it.trName();
-            if (!seen.add(key)) continue; // ayni kalem iki etiketle eslesirse tek kez
-            double change = (cur - prev) / Math.abs(prev) * 100.0;
-            boolean down = cur < prev;
-            if (it.profit() && down && Math.abs(change) >= FINDING_THRESHOLD) {
-                out.add(profitFinding(it, prev, cur, Math.abs(change), en));
-            } else if (!it.profit() && !down && change >= FINDING_THRESHOLD) {
-                out.add(expenseFinding(it, prev, cur, change, en));
+    // Belge tek çağrıya sığmıyorsa parça parça denenir; tabloyu içeren ilk parça yeterlidir.
+    // Çıkarım başarısız olursa inceleme düşmez, yalnızca kural katmanı devreye girmez.
+    private StatementExtraction extractStatement(String documentText) {
+        for (String chunk : splitIntoChunks(documentText)) {
+            try {
+                Map<String, Object> body = Map.of(
+                        "model", model,
+                        "temperature", 0,
+                        "seed", 7,
+                        "response_format", Map.of(
+                                "type", "json_schema",
+                                "json_schema", Map.of(
+                                        "name", "income_statement_extraction",
+                                        "strict", true,
+                                        "schema", extractionSchema())),
+                        "messages", List.of(
+                                Map.of("role", "system", "content", EXTRACTION_PROMPT),
+                                Map.of("role", "user", "content", chunk)));
+                JsonNode response = postToLlmWithRetry(body);
+                String content = response.at("/choices/0/message/content").asText();
+                if (content.isBlank()) continue;
+                StatementExtraction extraction = objectMapper.readValue(content, StatementExtraction.class);
+                if (extraction.found() && !extraction.items().isEmpty()) return extraction;
+            } catch (Exception e) {
+                log.warn("Gelir tablosu cikarimi basarisiz, kural katmani atlaniyor: {}", e.toString());
+                return StatementExtraction.none();
             }
         }
-        return out;
+        return StatementExtraction.none();
     }
 
-    private AuditResponse.Risk profitFinding(LineItem it, double prev, double cur, double pct, boolean en) {
-        String name = en ? it.enName() : it.trName();
-        String title = en ? name + " declined by " + fmtPct(pct, true)
-                          : name + " " + fmtPct(pct, false) + " oran\u0131nda d\u00fc\u015ft\u00fc";
-        String ev = en
-                ? name + " fell from " + fmtNum(prev, true) + " million TL to " + fmtNum(cur, true)
-                  + " million TL, a " + fmtPct(pct, true) + " decrease."
-                : name + " " + fmtNum(prev, false) + " milyon TL'den " + fmtNum(cur, false)
-                  + " milyon TL'ye " + fmtPct(pct, false) + " oran\u0131nda d\u00fc\u015fm\u00fc\u015ft\u00fcr.";
-        return new AuditResponse.Risk(title, "MEDIUM", ev, ev);
+    private Map<String, Object> extractionSchema() {
+        List<String> keys = Arrays.stream(LineItemKey.values()).map(LineItemKey::jsonKey).toList();
+        Map<String, Object> item = Map.of(
+                "type", "object",
+                "additionalProperties", false,
+                "required", List.of("key", "label", "current", "previous", "page"),
+                "properties", Map.of(
+                        "key", Map.of("type", "string", "enum", keys),
+                        "label", Map.of("type", "string"),
+                        "current", Map.of("type", "string"),
+                        "previous", Map.of("type", "string"),
+                        "page", Map.of("type", "integer")));
+        Map<String, Object> unit = Map.of(
+                "type", List.of("object", "null"),
+                "additionalProperties", false,
+                "required", List.of("currency", "scale"),
+                "properties", Map.of(
+                        "currency", Map.of("type", "string"),
+                        "scale", Map.of("type", "string", "enum", List.of("units", "thousand", "million", "billion"))));
+        Map<String, Object> periods = Map.of(
+                "type", List.of("object", "null"),
+                "additionalProperties", false,
+                "required", List.of("current", "previous"),
+                "properties", Map.of(
+                        "current", Map.of("type", "string"),
+                        "previous", Map.of("type", "string")));
+        return Map.of(
+                "type", "object",
+                "additionalProperties", false,
+                "required", List.of("found", "unit", "periods", "items"),
+                "properties", Map.of(
+                        "found", Map.of("type", "boolean"),
+                        "unit", unit,
+                        "periods", periods,
+                        "items", Map.of("type", "array", "items", item)));
     }
+    // ===== /GELİR TABLOSU =====
 
-    private AuditResponse.Risk expenseFinding(LineItem it, double prev, double cur, double pct, boolean en) {
-        String name = en ? it.enName() : it.trName();
-        String title = en ? name + " increased by " + fmtPct(pct, true)
-                          : name + " " + fmtPct(pct, false) + " oran\u0131nda artt\u0131";
-        String ev = en
-                ? name + " increased from " + fmtNum(prev, true) + " million TL to " + fmtNum(cur, true)
-                  + " million TL, a " + fmtPct(pct, true) + " increase."
-                : name + " " + fmtNum(prev, false) + " milyon TL'den " + fmtNum(cur, false)
-                  + " milyon TL'ye " + fmtPct(pct, false) + " oran\u0131nda artm\u0131\u015ft\u0131r.";
-        return new AuditResponse.Risk(title, "MEDIUM", ev, ev);
-    }
-
-    // TR ("19.917,1"), EN ("12,345.6") ve tek-ayiricili bicimleri guvenli cozer:
-    // iki ayirici turu varsa SAGDAKI ondaliktir; tek tur ayirici birden fazla gectiyse ya da
-    // tam 3 hane izliyorsa ("12,345" / "1.234") BINLIKTIR, aksi halde ondaliktir ("74,7").
-    // Parantez (negatif gosterimi) atilir — motor buyukluk/yon icin mutlak degerle calisir.
-    private static Double plNum(String s) {
-        if (s == null) return null;
-        String t = s.replace("(", "").replace(")", "").trim();
-        boolean hasDot = t.indexOf('.') >= 0, hasComma = t.indexOf(',') >= 0;
-        try {
-            if (hasDot && hasComma) {
-                boolean dotDecimal = t.lastIndexOf('.') > t.lastIndexOf(',');
-                String cleaned = dotDecimal ? t.replace(",", "") : t.replace(".", "").replace(',', '.');
-                return Double.parseDouble(cleaned);
-            }
-            if (hasDot || hasComma) {
-                char sep = hasDot ? '.' : ',';
-                int first = t.indexOf(sep), last = t.lastIndexOf(sep);
-                boolean thousands = first != last || t.length() - last - 1 == 3;
-                if (thousands) return Double.parseDouble(t.replace(String.valueOf(sep), ""));
-                return Double.parseDouble(t.replace(sep, '.'));
-            }
-            return Double.parseDouble(t);
-        } catch (NumberFormatException e) {
-            return null;
-        }
-    }
-
-    // Sayiyi dile gore bicimlendirir. EN: binlik ',' ondalik '.'  TR: binlik '.' ondalik ','
-    private static String fmtNum(double v, boolean en) {
-        long whole = (long) Math.floor(Math.abs(v));
-        int frac = (int) Math.round((Math.abs(v) - whole) * 10);
-        if (frac == 10) { whole += 1; frac = 0; }
-        String grp = String.format(en ? "%,d" : "%,d", whole);
-        if (en) {
-            grp = String.format("%,d", whole); // 26,211
-        } else {
-            grp = String.format("%,d", whole).replace(",", "."); // 26.211
-        }
-        String dec = en ? "." : ",";
-        return grp + dec + frac;
-    }
-
-    private static String fmtPct(double p, boolean en) {
-        double r = Math.round(p * 10) / 10.0;
-        long whole = (long) r;
-        int frac = (int) Math.round((r - whole) * 10);
-        String num = (en ? whole + "." + frac : whole + "," + frac);
-        return en ? num + "%" : "%" + num;
-    }
-    // ===== /DETERMINISTIK FINANSAL BULGU MOTORU =====
 
     private int severityRank(String severity) {
         if (severity == null) return 0;
@@ -679,15 +633,19 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     }
 
     private AuditResponse postProcess(AuditResponse response, List<RegulationChunk> context,
-                                      String documentText, String language,
+                                      String documentText, String language, String documentType,
                                       boolean truncated, int totalPages, int includedPages) {
-        // 0) Deterministik finansal bulgu motoru: kar/zarar tablosu parse edilebiliyorsa
-        //    bulgulari KODLA uret (LLM'e biraktirma). Ayni belge -> her dilde birebir ayni
-        //    bulgu seti -> ayni skor. Parse edilemezse (finansal degilse) LLM bulgulari kalir.
-        List<AuditResponse.Risk> deterministic = deterministicFinancialFindings(documentText, language);
-        if (!deterministic.isEmpty()) {
+        Map<Integer, String> pages = splitPages(documentText);
+        // 0) Gelir tablosu kalemleri: LLM okur, kod karar verir. Kodun cevap verdiği kalem hakkında
+        //    LLM'in yazdığı serbest bulgu düşer; kalan LLM bulguları (yoğunlaşma, riskten korunma vb.) kalır.
+        FinancialRuleEngine.Result rules = financialRules(documentText, pages, language, documentType);
+        if (!rules.covered().isEmpty()) {
+            List<AuditResponse.Risk> combined = new ArrayList<>(rules.findings());
+            for (AuditResponse.Risk r : response.risks()) {
+                if (!FinancialRuleEngine.coveredByRules(r, rules.covered())) combined.add(r);
+            }
             response = new AuditResponse(response.riskScore(), response.scoreRationale(),
-                    response.summary(), deterministic, response.recommendations(),
+                    response.summary(), combined, response.recommendations(),
                     response.keyMetrics(), response.advisorQuestions(), response.references());
         }
         // 1) Mevzuat referansları (yalnizca RAG baglami varsa filtrele/uret)
@@ -705,7 +663,6 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
         // 2) Sayfa dogrulama: kanit rakamlarini [REPORT PAGE n] bloklarinda ara,
         //    model ne derse desin referansi gercek sayfayla degistir
-        Map<Integer, String> pages = splitPages(documentText);
         boolean turkish = "tr".equalsIgnoreCase(language);
         String pageWord = turkish ? "Sayfa" : "Page";
         // Standart kilidi (deterministik): ozet hangi standardi sectiyse, sadece diger
