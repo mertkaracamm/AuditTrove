@@ -61,7 +61,8 @@ class StatementPipelineTest {
         // Finansman gideri %18,6 azaldı: eşik altı ve doğru yönde, bulgu yok ama kalem "cevaplanmış".
         assertThat(tr.covered()).contains(LineItemKey.FINANCE_COSTS, LineItemKey.ADMIN_EXPENSES);
         assertThat(tr.findings().get(0).evidence())
-                .contains("60.000.000 bin TL").contains("30.000.000 bin TL").endsWith("[REPORT PAGE 13]");
+                .contains("60.000.000 bin TL").contains("30.000.000 bin TL");
+        assertThat(tr.findings().get(0).pages()).containsExactly(13);
     }
 
     @Test
@@ -72,7 +73,7 @@ class StatementPipelineTest {
         assertThat(en.findings()).hasSameSizeAs(tr.findings());
         assertThat(en.covered()).isEqualTo(tr.covered());
         assertThat(en.findings().get(0).evidence())
-                .isEqualTo("Operating profit fell from 60,000,000 thousand TL to 30,000,000 thousand TL, a 50.0% decrease. [REPORT PAGE 13]");
+                .isEqualTo("Operating profit fell from 60,000,000 thousand TL to 30,000,000 thousand TL, a 50.0% decrease.");
     }
 
     @Test
@@ -117,9 +118,9 @@ class StatementPipelineTest {
     void llmFindingAboutCoveredItemYieldsToRuleAnswer() {
         var covered = FinancialRuleEngine.evaluate(StatementVerifier.verify(goodExtraction(), PAGES), Lang.EN).covered();
         var wrongLlm = new AuditResponse.Risk("Rising finance costs", "MEDIUM",
-                "Finance costs increased 18%", "Finance costs increased 18% [REPORT PAGE 13]");
+                "Finance costs increased 18%", "Finance costs increased 18%");
         var unrelated = new AuditResponse.Risk("Related party concentration", "MEDIUM",
-                "80% of sales to related parties", "Sales to related parties 80% (Page 3)");
+                "80% of sales to related parties", "Sales to related parties 80%");
         assertThat(FinancialRuleEngine.coveredByRules(wrongLlm, covered)).isTrue();
         assertThat(FinancialRuleEngine.coveredByRules(unrelated, covered)).isFalse();
     }

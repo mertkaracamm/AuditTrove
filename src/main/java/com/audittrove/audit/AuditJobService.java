@@ -1,5 +1,6 @@
 package com.audittrove.audit;
 
+import com.audittrove.financial.Lang;
 import com.audittrove.api.AuditResponse;
 import com.audittrove.security.ExpoPushClient;
 import com.audittrove.security.PushTokenStore;
@@ -71,7 +72,7 @@ public class AuditJobService {
                 return;
             }
             log.info("Push gonderiliyor (job {})", job.id());
-            boolean turkish = !"en".equalsIgnoreCase(job.language());
+            boolean turkish = Lang.of(job.language()).isTurkish();
             // Dosya adi push metninde KULLANILMIYOR: multipart'tan gelen ad Turkce karakterlerde
             // bozuk/percent-encoded olabiliyor (or. "%C3%87"). Genel, encoding-guvenli mesaj veriyoruz.
             String title = turkish ? "İncelemeniz hazır" : "Your review is ready";

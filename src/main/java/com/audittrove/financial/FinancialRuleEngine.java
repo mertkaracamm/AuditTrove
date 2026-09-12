@@ -73,9 +73,7 @@ public final class FinancialRuleEngine {
             evidence = name + (down ? " fell from " : " increased from ") + prevText + " to " + curText
                     + ", a " + pctText + (down ? " decrease." : " increase.");
         }
-        // Sayfa işaretçisi mevcut sayfa doğrulama katmanının anladığı biçimde eklenir.
-        evidence = evidence + " [REPORT PAGE " + item.page() + "]";
-        return new AuditResponse.Risk(title, SEVERITY, evidence, evidence);
+        return new AuditResponse.Risk(title, SEVERITY, evidence, evidence, List.of(item.page()));
     }
 
     // Belgenin beyan ettiği ölçek ve para birimi; beyan yoksa birim yazılmaz, uydurulmaz.
