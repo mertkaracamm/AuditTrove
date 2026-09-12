@@ -76,7 +76,7 @@ public final class FinancialRuleEngine {
             evidence = name + (down ? " fell from " : " increased from ") + prevText + " to " + curText
                     + ", a " + pctText + (down ? " decrease." : " increase.");
         }
-        return new AuditResponse.Risk(title, SEVERITY, evidence, evidence, List.of(item.page()));
+        return new AuditResponse.Risk(title, SEVERITY, evidence, evidence, List.of(item.page()), AuditResponse.Risk.ENGINE);
     }
 
     // Belgenin beyan ettiği ölçek ve para birimi; beyan yoksa birim yazılmaz, uydurulmaz.

@@ -33,19 +33,32 @@ public record AuditResponse(
         this(riskScore, scoreRationale, summary, risks, recommendations, keyMetrics, advisorQuestions, references, null, 0);
     }
 
-    /** pages: bulgunun dayandığı gerçek sayfalar; metin içinde sayfa atfı taşınmaz, arayüz bu alandan basar. */
-    public record Risk(String title, String severity, String finding, String evidence, List<Integer> pages) {
+    /**
+     * pages: bulgunun dayandığı gerçek sayfalar; metin içinde sayfa atfı taşınmaz, arayüz bu alandan basar.
+     * source: "engine" (sayılardan kodla), "rubric" (kontrol listesi, sabit başlık/önem), "model" (LLM'in
+     * serbest gözlemi; skora girmez, arayüz "ek gözlem" olarak ayırır).
+     */
+    public record Risk(String title, String severity, String finding, String evidence, List<Integer> pages, String source) {
+        public static final String ENGINE = "engine";
+        public static final String RUBRIC = "rubric";
+        public static final String MODEL = "model";
+
         @JsonCreator
         public Risk {
             pages = pages == null ? List.of() : List.copyOf(pages);
+            source = source == null || source.isBlank() ? MODEL : source;
         }
 
         public Risk(String title, String severity, String finding, String evidence) {
-            this(title, severity, finding, evidence, List.of());
+            this(title, severity, finding, evidence, List.of(), MODEL);
         }
 
-        public Risk withPagesAndEvidence(List<Integer> newPages, String newEvidence) {
-            return new Risk(title, severity, finding, newEvidence, newPages);
+        public Risk(String title, String severity, String finding, String evidence, List<Integer> pages) {
+            this(title, severity, finding, evidence, pages, MODEL);
+        }
+
+        public boolean isModel() {
+            return MODEL.equals(source);
         }
     }
 

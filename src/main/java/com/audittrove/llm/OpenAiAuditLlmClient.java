@@ -11,6 +11,7 @@ import com.audittrove.rag.RegulationChunk;
 import com.audittrove.report.LanguageCheck;
 import com.audittrove.report.PageRefs;
 import com.audittrove.report.ReportGate;
+import com.audittrove.report.RubricItem;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -576,6 +577,110 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     }
     // ===== /GELİR TABLOSU =====
 
+    // ===== KONTROL LİSTESİ (RUBRİK) =====
+    // LLM'e "riskleri bul" denmez; belge tipine göre sabit sorulara var/yok + kanıt ister. Başlık ve
+    // önem kodda sabit olduğu için aynı belge aynı bulgu setini ve aynı bandı verir.
+    private static final int MAX_MODEL_FINDINGS = 2;
+    private static final String RUBRIC_PROMPT = """
+            You are answering a fixed checklist about a document. First classify the document kind.
+            Then, for EVERY checklist item, answer present=true only if the document itself explicitly
+            supports it; otherwise present=false. Never infer from general knowledge.
+            For present items give a short evidence sentence that paraphrases or quotes the document,
+            keeping numbers, dates, currency and note references exactly as printed, and the number inside
+            the nearest preceding [REPORT PAGE n] marker as page. For absent items evidence is "" and page 0.
+            Items that belong to a different document kind than the one you classified must be present=false.
+            """;
+
+    private record RubricAnswer(String id, boolean present, String evidence, int page) {}
+    private record RubricResult(String documentKind, List<RubricAnswer> answers) {}
+
+    private List<AuditResponse.Risk> rubricFindings(String documentText, Lang lang) {
+        try {
+            String chunk = splitIntoChunks(documentText).get(0);
+            Map<String, Object> body = Map.of(
+                    "model", model, "temperature", 0, "seed", 7,
+                    "response_format", Map.of("type", "json_schema", "json_schema",
+                            Map.of("name", "checklist", "strict", true, "schema", rubricSchema())),
+                    "messages", List.of(
+                            Map.of("role", "system", "content", RUBRIC_PROMPT + rubricQuestions() + languageInstruction(lang)),
+                            Map.of("role", "user", "content", chunk)));
+            JsonNode response = postToLlmWithRetry(body);
+            RubricResult result = objectMapper.readValue(response.at("/choices/0/message/content").asText(), RubricResult.class);
+            RubricItem.Kind kind = RubricItem.kindOf(result.documentKind());
+            List<AuditResponse.Risk> out = new ArrayList<>();
+            for (RubricItem item : RubricItem.forKind(kind)) {
+                for (RubricAnswer a : result.answers()) {
+                    if (!a.present() || RubricItem.fromId(a.id()) != item) continue;
+                    String evidence = a.evidence() == null ? "" : a.evidence().trim();
+                    if (evidence.isEmpty()) break; // kanıtsız "var" kabul edilmez
+                    List<Integer> pages = a.page() > 0 ? List.of(a.page()) : List.of();
+                    out.add(new AuditResponse.Risk(item.title(lang), item.severity(), evidence, evidence, pages,
+                            AuditResponse.Risk.RUBRIC));
+                    break;
+                }
+            }
+            log.info("Kontrol listesi: tur={} bulgu={}", kind, out.size());
+            return out;
+        } catch (Exception e) {
+            log.warn("Kontrol listesi calismadi, LLM bulgulariyla devam: {}", e.toString());
+            return List.of();
+        }
+    }
+
+    private String rubricQuestions() {
+        StringBuilder sb = new StringBuilder("\nDocument kinds: ");
+        sb.append(Arrays.stream(RubricItem.Kind.values()).map(k -> k.name().toLowerCase(Locale.ROOT)).collect(Collectors.joining(", ")));
+        sb.append("\nChecklist items (id — applies to kind — question):\n");
+        for (RubricItem r : RubricItem.values()) {
+            sb.append("- ").append(r.id()).append(" — ").append(r.kind().name().toLowerCase(Locale.ROOT))
+              .append(" — ").append(r.question()).append("\n");
+        }
+        return sb.toString();
+    }
+
+    private Map<String, Object> rubricSchema() {
+        List<String> ids = Arrays.stream(RubricItem.values()).map(RubricItem::id).toList();
+        List<String> kinds = Arrays.stream(RubricItem.Kind.values()).map(k -> k.name().toLowerCase(Locale.ROOT)).toList();
+        Map<String, Object> answer = Map.of(
+                "type", "object", "additionalProperties", false,
+                "required", List.of("id", "present", "evidence", "page"),
+                "properties", Map.of(
+                        "id", Map.of("type", "string", "enum", ids),
+                        "present", Map.of("type", "boolean"),
+                        "evidence", Map.of("type", "string"),
+                        "page", Map.of("type", "integer")));
+        return Map.of(
+                "type", "object", "additionalProperties", false,
+                "required", List.of("documentKind", "answers"),
+                "properties", Map.of(
+                        "documentKind", Map.of("type", "string", "enum", kinds),
+                        "answers", Map.of("type", "array", "items", answer)));
+    }
+
+    // Aynı konuyu anlatan iki bulgu olmasın: LLM'in serbest bulgusu motor/rubrik bulgusuyla kelime
+    // bazında yeterince örtüşüyorsa atlanır (başlık ve kanıttaki 5+ harfli kelimelerin ortak oranı).
+    private static boolean overlapsAny(AuditResponse.Risk candidate, List<AuditResponse.Risk> existing) {
+        Set<String> a = contentWords(candidate);
+        if (a.isEmpty()) return false;
+        for (AuditResponse.Risk e : existing) {
+            Set<String> b = contentWords(e);
+            if (b.isEmpty()) continue;
+            long common = a.stream().filter(b::contains).count();
+            if (common >= 3 && common * 2 >= Math.min(a.size(), b.size())) return true;
+        }
+        return false;
+    }
+
+    private static Set<String> contentWords(AuditResponse.Risk r) {
+        Set<String> out = new HashSet<>();
+        String text = ((r.title() == null ? "" : r.title()) + " " + (r.evidence() == null ? "" : r.evidence()))
+                .toLowerCase(Locale.forLanguageTag("tr"));
+        Matcher m = Pattern.compile("\\p{L}{5,}").matcher(text);
+        while (m.find()) out.add(m.group());
+        return out;
+    }
+    // ===== /KONTROL LİSTESİ =====
+
 
     private int severityRank(String severity) {
         if (severity == null) return 0;
@@ -644,10 +749,20 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         // 0) Gelir tablosu kalemleri: LLM okur, kod karar verir. Kodun cevap verdiği kalem hakkında
         //    LLM'in yazdığı serbest bulgu düşer; kalan LLM bulguları (yoğunlaşma, riskten korunma vb.) kalır.
         FinancialRuleEngine.Result rules = financialRules(documentText, pages, lang);
-        if (!rules.covered().isEmpty()) {
+        // 0b) Kontrol listesi: belge tipine göre sabit sorular, sabit başlık ve önem. Skoru motor + rubrik
+        //     belirler; LLM'in serbest bulguları "model" kaynaklı ek gözlem olarak kalır, en fazla iki tane.
+        List<AuditResponse.Risk> rubric = rubricFindings(documentText, lang);
+        {
             List<AuditResponse.Risk> combined = new ArrayList<>(rules.findings());
+            combined.addAll(rubric);
+            int extras = 0;
             for (AuditResponse.Risk r : response.risks()) {
-                if (!FinancialRuleEngine.coveredByRules(r, rules.covered())) combined.add(r);
+                if (FinancialRuleEngine.coveredByRules(r, rules.covered())) continue;
+                if (overlapsAny(r, combined)) continue;
+                if (!rubric.isEmpty() && extras >= MAX_MODEL_FINDINGS) break;
+                combined.add(new AuditResponse.Risk(r.title(), r.severity(), r.finding(), r.evidence(), r.pages(),
+                        AuditResponse.Risk.MODEL));
+                extras++;
             }
             response = new AuditResponse(response.riskScore(), response.scoreRationale(),
                     response.summary(), combined, response.recommendations(),
@@ -693,7 +808,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 found = new ArrayList<>(claimed);
             }
             AuditResponse.Risk gated = ReportGate.gateRisk(
-                    new AuditResponse.Risk(risk.title(), risk.severity(), fi.text(), ev.text(), found));
+                    new AuditResponse.Risk(risk.title(), risk.severity(), fi.text(), ev.text(), found, risk.source()));
             if (gated == null) {
                 log.warn("Bulgu kanit kapisindan gecemedi, dusuruldu: {}", risk.title());
                 continue;
@@ -798,7 +913,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             List<AuditResponse.Risk> risks = new ArrayList<>();
             for (AuditResponse.Risk k : r.risks()) {
                 String title = items.get(i++).asText(), evidence = items.get(i++).asText(), finding = items.get(i++).asText();
-                risks.add(new AuditResponse.Risk(title, k.severity(), finding, evidence, k.pages()));
+                risks.add(new AuditResponse.Risk(title, k.severity(), finding, evidence, k.pages(), k.source()));
             }
             List<String> recs = new ArrayList<>();
             for (int n = 0; n < r.recommendations().size(); n++) recs.add(items.get(i++).asText());
@@ -1260,7 +1375,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         int top = 0, count = 0;
         if (risks != null) {
             for (AuditResponse.Risk r : risks) {
-                if (isCrossAddition(r)) continue;
+                if (isCrossAddition(r) || r.isModel()) continue; // ek gözlemler skora girmez
                 int rank = severityRank(r.severity());
                 if (rank == 0) continue;
                 count++;

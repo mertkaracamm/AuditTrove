@@ -115,7 +115,8 @@ function check(result, lang) {
 
   // skor
   const risks = result.risks || [];
-  const counted = risks.filter((r) => !/^(Cross-check:|Çapraz doğrulama:)/.test(r.title || ''));
+  // Skora giren bulgular: motor + rubrik. LLM'in serbest gözlemleri (source=model) ve çapraz kontrol eklemeleri girmez.
+  const counted = risks.filter((r) => r.source !== 'model' && !/^(Cross-check:|Çapraz doğrulama:)/.test(r.title || ''));
   const rank = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
   const top = Math.max(0, ...counted.map((r) => rank[r.severity] || 0));
   const few = counted.length <= 3;
@@ -201,8 +202,10 @@ const pad = (s, n) => String(s).padEnd(n);
         if (scores.size > 1) { console.log(`    - tutarlılık: skor koşular arasında değişti ${[...scores].join(' / ')}`); totalFail++; }
         const eng = ok.map((x) => engineFindings(x.result).join('\n'));
         if (new Set(eng).size > 1) { console.log('    - tutarlılık: motor bulguları koşular arasında farklı'); totalFail++; }
-        const counts = ok.map((x) => (x.result.risks || []).length);
-        if (Math.max(...counts) - Math.min(...counts) > 1) { console.log(`    - tutarlılık: bulgu sayısı ${counts.join(' / ')} (1'den fazla oynadı)`); totalFail++; }
+        const counts = ok.map((x) => (x.result.risks || []).filter((r) => r.source !== 'model').length);
+        if (Math.max(...counts) - Math.min(...counts) > 1) { console.log(`    - tutarlılık: skora giren bulgu sayısı ${counts.join(' / ')} (1'den fazla oynadı)`); totalFail++; }
+        const rubricTitles = ok.map((x) => (x.result.risks || []).filter((r) => r.source === 'rubric').map((r) => r.title).sort().join('|'));
+        if (new Set(rubricTitles).size > 1) { console.log('    - tutarlılık: kontrol listesi bulguları koşular arasında farklı'); totalFail++; }
       }
     }
   }

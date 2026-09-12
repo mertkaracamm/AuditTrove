@@ -90,4 +90,25 @@ class ReportContractTest {
         var keepsGivenUnit = ReportGate.gateMetric(new AuditResponse.KeyMetric("Net income", "38.863.566", "bin TL", "x"));
         assertThat(keepsGivenUnit.unit()).isEqualTo("bin TL");
     }
+
+    @Test
+    void rubricItemsAreFixedPerKindAndBothLanguages() {
+        assertThat(RubricItem.forKind(RubricItem.Kind.FINANCIAL)).contains(RubricItem.FIN_GOING_CONCERN, RubricItem.FIN_AUDIT_OPINION_MODIFIED);
+        assertThat(RubricItem.forKind(RubricItem.Kind.RENTAL)).doesNotContain(RubricItem.FIN_GOING_CONCERN);
+        assertThat(RubricItem.FIN_GOING_CONCERN.severity()).isEqualTo("HIGH");
+        assertThat(RubricItem.FIN_GOING_CONCERN.title(Lang.TR)).isEqualTo("İşletmenin sürekliliğine ilişkin önemli belirsizlik");
+        assertThat(RubricItem.FIN_GOING_CONCERN.title(Lang.EN)).isEqualTo("Material uncertainty about going concern");
+        assertThat(RubricItem.fromId("rent_auto_renewal")).isEqualTo(RubricItem.RENT_AUTO_RENEWAL);
+        assertThat(RubricItem.kindOf("subscription")).isEqualTo(RubricItem.Kind.SUBSCRIPTION);
+        assertThat(RubricItem.kindOf("nonsense")).isEqualTo(RubricItem.Kind.OTHER);
+    }
+
+    @Test
+    void modelFindingsCarrySourceAndDefault() {
+        var free = new AuditResponse.Risk("x", "MEDIUM", "f", "e");
+        assertThat(free.source()).isEqualTo(AuditResponse.Risk.MODEL);
+        assertThat(free.isModel()).isTrue();
+        var rubric = new AuditResponse.Risk("x", "HIGH", "f", "e", List.of(2), AuditResponse.Risk.RUBRIC);
+        assertThat(rubric.isModel()).isFalse();
+    }
 }
