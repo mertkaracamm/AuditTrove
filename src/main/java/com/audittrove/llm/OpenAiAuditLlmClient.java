@@ -595,40 +595,88 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private record RubricAnswer(String id, boolean present, String evidence, int page) {}
     private record RubricResult(String documentKind, List<RubricAnswer> answers) {}
 
+    // Birincil model cevaplar; ikincil modeller aynı soruları oylar. Bir madde ancak çoğunluk "var"
+    // dediyse bulgu olur — sınırdaki maddelerin koşudan koşuya değişmesini oylama söndürür.
     private List<AuditResponse.Risk> rubricFindings(String documentText, Lang lang, String documentType) {
         try {
             String chunk = splitIntoChunks(documentText).get(0);
+            String system = RUBRIC_PROMPT + rubricQuestions() + languageInstruction(lang);
             Map<String, Object> body = Map.of(
                     "model", model, "temperature", 0, "seed", 7,
                     "response_format", Map.of("type", "json_schema", "json_schema",
                             Map.of("name", "checklist", "strict", true, "schema", rubricSchema())),
                     "messages", List.of(
-                            Map.of("role", "system", "content", RUBRIC_PROMPT + rubricQuestions() + languageInstruction(lang)),
+                            Map.of("role", "system", "content", system),
                             Map.of("role", "user", "content", chunk)));
             JsonNode response = postToLlmWithRetry(body);
-            RubricResult result = objectMapper.readValue(response.at("/choices/0/message/content").asText(), RubricResult.class);
-            // Tür seçimi kodda: kullanıcı tipi seçtiyse o; seçmediyse "var" cevabı en çok olan tür.
-            // Modelin kendi sınıflaması yalnızca eşitlikte ve yalnızca aday türler arasında kullanılır.
+            RubricResult primary = objectMapper.readValue(response.at("/choices/0/message/content").asText(), RubricResult.class);
+            List<RubricResult> votes = new ArrayList<>();
+            votes.add(primary);
+            votes.addAll(rubricSecondaryVotes(system, chunk));
+
             RubricItem.Kind kind = kindFromDocumentType(documentType);
-            if (kind == null) kind = dominantKind(result);
+            if (kind == null) kind = dominantKind(primary);
+            int needed = votes.size() >= 3 ? 2 : 1; // üç oy varsa çoğunluk, yoksa birincil tek başına
             List<AuditResponse.Risk> out = new ArrayList<>();
             for (RubricItem item : RubricItem.forKind(kind)) {
-                for (RubricAnswer a : result.answers()) {
-                    if (!a.present() || RubricItem.fromId(a.id()) != item) continue;
-                    String evidence = a.evidence() == null ? "" : a.evidence().trim();
-                    if (evidence.isEmpty()) break; // kanıtsız "var" kabul edilmez
-                    List<Integer> pages = a.page() > 0 ? List.of(a.page()) : List.of();
-                    out.add(new AuditResponse.Risk(item.title(lang), item.severity(), evidence, evidence, pages,
-                            AuditResponse.Risk.RUBRIC));
-                    break;
+                int yes = 0;
+                RubricAnswer best = null;
+                for (int v = 0; v < votes.size(); v++) {
+                    RubricAnswer a = answerFor(votes.get(v), item);
+                    if (a == null || !a.present() || a.evidence() == null || a.evidence().isBlank()) continue;
+                    yes++;
+                    if (best == null) best = a; // kanıt öncelikle birincilden
                 }
+                if (yes < needed || best == null) continue;
+                List<Integer> pages = best.page() > 0 ? List.of(best.page()) : List.of();
+                out.add(new AuditResponse.Risk(item.title(lang), item.severity(), best.evidence().trim(),
+                        best.evidence().trim(), pages, AuditResponse.Risk.RUBRIC));
             }
-            log.info("Kontrol listesi: tur={} bulgu={}", kind, out.size());
+            log.info("Kontrol listesi: tur={} oy={} bulgu={}", kind, votes.size(), out.size());
             return out;
         } catch (Exception e) {
             log.warn("Kontrol listesi calismadi, LLM bulgulariyla devam: {}", e.toString());
             return List.of();
         }
+    }
+
+    private static RubricAnswer answerFor(RubricResult r, RubricItem item) {
+        if (r == null || r.answers() == null) return null;
+        for (RubricAnswer a : r.answers()) if (RubricItem.fromId(a.id()) == item) return a;
+        return null;
+    }
+
+    // İkincil modeller aynı kontrol listesini paralel cevaplar; yapılandırılmamışsa boş döner.
+    private List<RubricResult> rubricSecondaryVotes(String system, String chunk) {
+        if (!multiModelEnabled) return List.of();
+        List<SecondaryBackend> active = secondaryBackends.stream().filter(SecondaryBackend::configured).toList();
+        if (active.size() < 2) return List.of();
+        String schemaText;
+        try { schemaText = objectMapper.writeValueAsString(rubricSchema()); } catch (Exception e) { return List.of(); }
+        String sys = system + "\nRespond with ONLY one JSON object (no markdown fences, no commentary) that validates against this JSON Schema:\n" + schemaText;
+        List<CompletableFuture<RubricResult>> futures = new ArrayList<>();
+        for (SecondaryBackend b : active) {
+            futures.add(CompletableFuture.supplyAsync(() -> {
+                try {
+                    String json = extractJsonObject(b.completeJson(sys, chunk));
+                    return json.isBlank() ? null : objectMapper.readValue(json, RubricResult.class);
+                } catch (Exception e) {
+                    log.warn("Kontrol listesi oyu {} basarisiz: {}", b.name(), e.toString());
+                    return null;
+                }
+            }, crossCheckExecutor));
+        }
+        try {
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(45, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("Kontrol listesi oylari zamaninda gelmedi: {}", e.toString());
+        }
+        List<RubricResult> out = new ArrayList<>();
+        for (CompletableFuture<RubricResult> f : futures) {
+            RubricResult r = f.getNow(null);
+            if (r != null) out.add(r);
+        }
+        return out;
     }
 
     private static RubricItem.Kind kindFromDocumentType(String documentType) {
@@ -1384,10 +1432,19 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // geçiyorsa bulgu o sayfaya bağlanır; en az üç kelime eşleşmezse sayfa verilmez.
     private static final Pattern WORD_TOKEN = Pattern.compile("\\p{L}{5,}");
 
+    // Rapor dili belge dilinden farklıysa kelimeler eşleşmez; sayılar, yıllar, dipnot numaraları ve
+    // özel adlar (büyük harfle başlayan) çeviride değişmez, onlar da çıpa olur.
+    private static final Pattern PROPER_NOUN = Pattern.compile("\\b\\p{Lu}\\p{Ll}{3,}\\b");
+    private static final Pattern SHORT_NUMBER = Pattern.compile("\\b\\d{1,4}(?:[.,]\\d+)?\\b");
+
     private List<Integer> groundByWords(String evidence, Map<Integer, String> pages) {
         Set<String> words = new HashSet<>();
         Matcher m = WORD_TOKEN.matcher(evidence.toLowerCase(Locale.forLanguageTag("tr")));
         while (m.find()) words.add(m.group());
+        Matcher pn = PROPER_NOUN.matcher(evidence);
+        while (pn.find()) words.add(pn.group().toLowerCase(Locale.forLanguageTag("tr")));
+        Matcher sn = SHORT_NUMBER.matcher(evidence);
+        while (sn.find()) words.add(sn.group());
         if (words.size() < 3) return List.of();
         int bestPage = -1, best = 0;
         for (Map.Entry<Integer, String> page : pages.entrySet()) {
@@ -1396,7 +1453,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             for (String w : words) if (text.contains(w)) hits++;
             if (hits > best || (hits == best && hits > 0 && page.getKey() < bestPage)) { best = hits; bestPage = page.getKey(); }
         }
-        return best >= 3 ? List.of(bestPage) : List.of();
+        // Az sayfalı belgede iki çıpa yeter; uzun belgede en az üç.
+        int minHits = pages.size() <= 3 ? 2 : 3;
+        return best >= minHits ? List.of(bestPage) : List.of();
     }
 
     // skor, bulgu siddet dagilimiyla ayni bantta kalsin

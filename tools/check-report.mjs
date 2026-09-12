@@ -20,13 +20,15 @@ const DOC_TYPE = args.type || 'general';
 const SCORES = new Set([12, 22, 36, 47, 60, 72, 82, 88, 95]);
 const SEVERITIES = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
 const TR_WORDS = new Set(['ve', 'ile', 'için', 'bir', 'bu', 'olarak', 'olan', 'olup', 'tarihi', 'itibarıyla', 'itibariyle', 'göre', 'ancak', 'veya', 'ise', 'kadar', 'üzere', 'gibi', 'daha']);
-const EN_WORDS = new Set(['the', 'and', 'of', 'to', 'in', 'for', 'with', 'is', 'are', 'by', 'from', 'that', 'as', 'on', 'which', 'this', 'at', 'be', 'or']);
+const EN_WORDS = new Set(['the', 'and', 'of', 'to', 'in', 'for', 'with', 'is', 'are', 'by', 'from', 'that', 'as', 'which', 'this', 'or', 'has', 'have', 'not']);
 const ENGINE_TITLE = /(declined by|increased by) \d|oranında (düştü|arttı)$/;
 const INCREASE = /artı[şs]|artm[ıi][şs]|increase|rose|higher|yüksel/i;
 const DECREASE = /azal|düş|decreas|declin|fell|lower|geriled/i;
 
 function detectLang(text) {
   if (!text) return null;
+  // Türkçeye özgü harf iki kez geçiyorsa metin Türkçedir; İngilizce metinde bulunmaz.
+  if ((text.match(/[ğşıİöüçĞŞÖÜÇ]/g) || []).length >= 2) return 'tr';
   let tr = 0, en = 0, words = 0;
   for (const w of text.toLowerCase().split(/[^\p{L}]+/u)) {
     if (!w) continue;
@@ -34,7 +36,7 @@ function detectLang(text) {
     if (TR_WORDS.has(w)) tr++;
     if (EN_WORDS.has(w)) en++;
   }
-  if (words < 6 || tr === en) return null;
+  if (words < 6 || Math.abs(tr - en) < 2) return null;
   return tr > en ? 'tr' : 'en';
 }
 

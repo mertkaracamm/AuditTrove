@@ -17,13 +17,19 @@ public final class LanguageCheck {
 
     private static final Set<String> TR = Set.of("ve", "ile", "için", "bir", "bu", "olarak", "olan", "olup",
             "tarihi", "itibarıyla", "itibariyle", "göre", "ancak", "veya", "ise", "kadar", "üzere", "gibi", "daha");
+    // "on", "at", "be" Türkçede de kelime; İngilizce listesinde tutulmaz.
     private static final Set<String> EN = Set.of("the", "and", "of", "to", "in", "for", "with", "is", "are",
-            "by", "from", "that", "as", "on", "which", "this", "at", "be", "or");
+            "by", "from", "that", "as", "which", "this", "or", "has", "have", "not");
     private static final int MIN_WORDS = 6;
+    private static final int MIN_MARGIN = 2;
 
     /** Metin belirgin şekilde diğer dildeyse o dili, aksi halde null döner (emin değilse susar). */
     public static Lang detect(String text) {
         if (text == null) return null;
+        // Türkçeye özgü harfler İngilizce metinde bulunmaz; iki tane yeterli kanıt.
+        int trLetters = 0;
+        for (char c : text.toCharArray()) if ("ğşıİöüçĞŞÖÜÇ".indexOf(c) >= 0) trLetters++;
+        if (trLetters >= 2) return Lang.TR;
         int tr = 0, en = 0, words = 0;
         for (String w : text.toLowerCase(Locale.forLanguageTag("tr")).split("[^\\p{L}]+")) {
             if (w.isEmpty()) continue;
@@ -31,7 +37,7 @@ public final class LanguageCheck {
             if (TR.contains(w)) tr++;
             if (EN.contains(w)) en++;
         }
-        if (words < MIN_WORDS || tr == en) return null;
+        if (words < MIN_WORDS || Math.abs(tr - en) < MIN_MARGIN) return null;
         return tr > en ? Lang.TR : Lang.EN;
     }
 
