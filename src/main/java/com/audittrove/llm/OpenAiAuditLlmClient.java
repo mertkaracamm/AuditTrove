@@ -734,6 +734,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         // Ayni metrigin iki formatla iki kart olmasini engelle
         // (or. "3.523 milyar TL" + "TL 3,5 trilyon" ayni deger).
         cleanMetrics = dedupeMetrics(cleanMetrics);
+        // Bulgulara uygulanan kural göstergelere de uygulanır: belgede geçmeyen sayı rapora giremez.
+        cleanMetrics = groundMetrics(cleanMetrics, pages);
 
         // Serbest metin alanlarına sızan sayfa işaretçileri de sökülür (sayfa bilgisi bulgularda taşınır).
         summary = PageRefs.strip(summary).text();
@@ -778,6 +780,24 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // kopya; (c) yuzde degerleri ancak sayi AYNEN esit VE etiketler ortak kelime paylasirsa
     // kopya (iki farkli oranin tesadufen ayni cikmasi mumkun, agresif eleme yanlis olur).
     // Kopyalardan hane sayisi fazla (daha hassas) olan tutulur; esitlikte ilk gelen kalir.
+    // Gösterge değeri belgenin herhangi bir sayfasında (biçimden bağımsız) geçmiyorsa kart düşer.
+    // İki haneli ve daha kısa sayılar (%80, 12 ay) doğrulanmaz, her belgede geçer.
+    private List<AuditResponse.KeyMetric> groundMetrics(List<AuditResponse.KeyMetric> metrics, Map<Integer, String> pages) {
+        if (metrics == null || metrics.isEmpty() || pages.isEmpty()) return metrics;
+        Set<String> docKeys = new HashSet<>();
+        for (String page : pages.values()) docKeys.addAll(NumberText.digitKeys(page));
+        List<AuditResponse.KeyMetric> kept = new ArrayList<>();
+        for (AuditResponse.KeyMetric m : metrics) {
+            String key = NumberText.digits(m.value());
+            if (key.length() >= 3 && !docKeys.contains(key)) {
+                log.warn("Gosterge belgede yok, dusuruldu: {} = {}", m.label(), m.value());
+                continue;
+            }
+            kept.add(m);
+        }
+        return kept;
+    }
+
     private List<AuditResponse.KeyMetric> dedupeMetrics(List<AuditResponse.KeyMetric> metrics) {
         if (metrics == null || metrics.size() < 2) return metrics;
         List<AuditResponse.KeyMetric> kept = new ArrayList<>();
@@ -1147,27 +1167,30 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return t != null && (t.startsWith(CROSS_PREFIX_TR) || t.startsWith(CROSS_PREFIX_EN));
     }
 
+    // Skor iki şeyden türer: en ağır bulgunun seviyesi (bant) ve bulgu sayısının az mı çok mu olduğu
+    // (bant içi konum). Bulgu sayısı bire bir puana çevrilmez; LLM'in bir bulgu fazla ya da eksik
+    // üretmesi skoru oynatmasın. Çapraz kontrol eklemeleri sayılmaz.
+    private static final int FEW_FINDINGS_MAX = 3;
+
     private int calibrateScore(int ignoredLlmScore, List<AuditResponse.Risk> risks) {
-        int crit = 0, high = 0, mid = 0, low = 0;
+        int top = 0, count = 0;
         if (risks != null) {
             for (AuditResponse.Risk r : risks) {
-                if (isCrossAddition(r)) continue; // capraz kontrol eklemesi — skora girmez
-                switch (severityRank(r.severity())) {
-                    case 4 -> crit++;
-                    case 3 -> high++;
-                    case 2 -> mid++;
-                    case 1 -> low++;
-                    default -> { }
-                }
+                if (isCrossAddition(r)) continue;
+                int rank = severityRank(r.severity());
+                if (rank == 0) continue;
+                count++;
+                top = Math.max(top, rank);
             }
         }
-        int penalty = crit * 45 + high * 28 + mid * 8 + low * 3;
-        int score = Math.max(0, Math.min(100, 100 - penalty));
-        // Bant garantisi (yuksek=iyi): en agir bulgu skorun tavanini belirler.
-        if (crit > 0) return Math.min(29, score);                 // kırmızı — madde madde
-        if (high > 0) return Math.max(30, Math.min(54, score));   // turuncu — dikkatle
-        if (mid > 0)  return Math.max(55, Math.min(79, score));   // sarı — gözden geçir
-        return Math.max(80, Math.min(100, score));                // yeşil — temiz
+        boolean few = count <= FEW_FINDINGS_MAX;
+        return switch (top) {
+            case 4 -> few ? 22 : 12;   // kırmızı — madde madde
+            case 3 -> few ? 47 : 36;   // turuncu — dikkatle
+            case 2 -> few ? 72 : 60;   // sarı — gözden geçir
+            case 1 -> few ? 88 : 82;   // yeşil — küçük notlar
+            default -> 95;             // yeşil — bulgu yok
+        };
     }
 
     // Rapor dili belgenin dilinden bağımsızdır; alıntı bile rapor diline çevrilir, sayılar aynen kalır.
