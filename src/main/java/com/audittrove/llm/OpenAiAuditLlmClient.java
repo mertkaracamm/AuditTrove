@@ -242,13 +242,15 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // token limiti aşılıyor ve 429 yağıyor. Sıra beklemek, işi düşürmekten iyidir.
     // Adil sıra: ilk gelen ilk alır; yoksa 10 kişilik yığılmada sonuncu 30 saniyede, ilk 2,5 dakikada bitiyor.
     private final Semaphore openAiSlots = new Semaphore(Integer.parseInt(System.getenv().getOrDefault("OPENAI_MAX_CONCURRENT", "4")), true);
-    // İkincil sağlayıcıların istek limitleri daha dar; sağlayıcı başına iki eşzamanlı çağrı.
+    // İkincil sağlayıcı başına eşzamanlı çağrı sınırı. Oylar kritik yolda; sınır dar olursa yığılmada
+    // her inceleme oy sırası bekler ve süre üçe katlanır. Sağlayıcının kademesine göre ortamdan ayarlanır.
+    private final int secondaryMaxConcurrent = Integer.parseInt(System.getenv().getOrDefault("SECONDARY_MAX_CONCURRENT", "8"));
     private final Map<String, Semaphore> secondarySlots = new ConcurrentHashMap<>();
 
     // İkincil model çağrısı: eşzamanlılık sınırı + geçici hatada (429/5xx/ağ) üç deneme. Oy kaybolursa
     // çoğunluk eşiği kayar ve aynı belge farklı bulgu verir; o yüzden oy düşürmemek için uğraşılır.
     private String secondaryCall(SecondaryBackend b, String system, String user) {
-        Semaphore slot = secondarySlots.computeIfAbsent(b.name(), k -> new Semaphore(2, true));
+        Semaphore slot = secondarySlots.computeIfAbsent(b.name(), k -> new Semaphore(secondaryMaxConcurrent, true));
         long backoffMs = 3000;
         RuntimeException last = null;
         for (int attempt = 1; attempt <= 3; attempt++) {
