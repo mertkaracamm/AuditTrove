@@ -600,7 +600,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private List<AuditResponse.Risk> rubricFindings(String documentText, Lang lang, String documentType) {
         try {
             String chunk = splitIntoChunks(documentText).get(0);
-            String system = RUBRIC_PROMPT + rubricQuestions() + languageInstruction(lang);
+            // Kontrol listesi her zaman İngilizce cevaplanır: var/yok kararı rapor diline bağlı olmasın.
+            // Kanıt cümleleri sonda dil kapısı tarafından rapor diline çevrilir.
+            String system = RUBRIC_PROMPT + rubricQuestions() + languageInstruction(Lang.EN);
             Map<String, Object> body = Map.of(
                     "model", model, "temperature", 0, "seed", 7,
                     "response_format", Map.of("type", "json_schema", "json_schema",

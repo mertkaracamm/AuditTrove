@@ -180,6 +180,7 @@ const pad = (s, n) => String(s).padEnd(n);
   let totalFail = 0;
   console.log(`${pad('belge', 44)} ${pad('dil', 4)} ${pad('koşu', 5)} ${pad('skor', 5)} ${pad('bulgu', 6)} ${pad('süre', 6)} durum`);
   for (const file of files) {
+    const perLang = {};
     for (const lang of LANGS) {
       const runs = [];
       for (let k = 1; k <= RUNS; k++) {
@@ -209,6 +210,15 @@ const pad = (s, n) => String(s).padEnd(n);
         const rubricTitles = ok.map((x) => (x.result.risks || []).filter((r) => r.source === 'rubric').map((r) => r.title).sort().join('|'));
         if (new Set(rubricTitles).size > 1) { console.log('    - tutarlılık: kontrol listesi bulguları koşular arasında farklı'); totalFail++; }
       }
+      if (ok.length) perLang[lang] = { score: ok[0].result.riskScore, counted: (ok[0].result.risks || []).filter((r) => r.source !== 'model').length };
+    }
+    // Dil bağımsızlığı: aynı belge iki dilde aynı skoru ve aynı sayıda skora giren bulguyu vermeli.
+    const langs = Object.keys(perLang);
+    if (langs.length >= 2) {
+      const scores = new Set(langs.map((l) => perLang[l].score));
+      if (scores.size > 1) { console.log(`    - dil bağımsızlığı: skor ${langs.map((l) => `${l}=${perLang[l].score}`).join(' / ')}`); totalFail++; }
+      const counts = langs.map((l) => perLang[l].counted);
+      if (Math.max(...counts) - Math.min(...counts) > 1) { console.log(`    - dil bağımsızlığı: skora giren bulgu ${langs.map((l) => `${l}=${perLang[l].counted}`).join(' / ')}`); totalFail++; }
     }
   }
   console.log(totalFail ? `\n${totalFail} FAIL` : '\nTÜMÜ PASS');
