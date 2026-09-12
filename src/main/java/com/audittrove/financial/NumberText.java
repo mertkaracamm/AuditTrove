@@ -12,8 +12,9 @@ import java.util.regex.Pattern;
 public final class NumberText {
     private NumberText() {}
 
-    // Metindeki sayı adayları: rakamla başlar, ayraç ve rakamla devam eder.
-    private static final Pattern TOKEN = Pattern.compile("\\d[\\d.,]*\\d|\\d");
+    // Metindeki sayı adayları: rakamla başlar, ayraç ve rakamla devam eder. Binlik ayracı boşluk
+    // olan biçimler ("18 420,6", taranmış belgeler, Fransızca/İsviçre yerleşimi) de tek sayı sayılır.
+    private static final Pattern TOKEN = Pattern.compile("\\d(?:[\\d.,]|[ \\u00a0](?=\\d{3}(?!\\d)))*\\d|\\d");
 
     // İki ayraç türü varsa sağdaki ondalıktır. Tek tür ayraç birden fazla geçiyorsa ya da
     // tam üç hane izliyorsa binliktir ("12,345" / "1.234"), aksi halde ondalıktır ("74,7").
@@ -21,7 +22,7 @@ public final class NumberText {
         if (raw == null) return null;
         String t = raw.trim();
         boolean negative = t.startsWith("(") && t.endsWith(")") || t.startsWith("-") || t.startsWith("−");
-        t = t.replaceAll("[()\\-\\u2212\\s]", "");
+        t = t.replaceAll("[()\\-\\u2212\\s\\u00a0]", "");
         if (t.isEmpty()) return null;
         boolean hasDot = t.indexOf('.') >= 0, hasComma = t.indexOf(',') >= 0;
         try {
@@ -68,6 +69,21 @@ public final class NumberText {
             if (digitKey.equals(digits(m.group()))) return m.start();
         }
         return -1;
+    }
+
+    // "%80", "80%", "%54,4", "54.4 %" — yüzde değerleri iki haneli olsa da ayırt edicidir.
+    private static final Pattern PERCENT = Pattern.compile("%\\s?(\\d{1,3}(?:[.,]\\d+)?)|(\\d{1,3}(?:[.,]\\d+)?)\\s?%");
+
+    /** Metindeki yüzde değerlerinin anahtarları ("P80", "P544"); sayfa ve kanıt aynı biçimde üretir. */
+    public static Set<String> percentKeys(String text) {
+        Set<String> keys = new HashSet<>();
+        if (text == null) return keys;
+        Matcher m = PERCENT.matcher(text);
+        while (m.find()) {
+            String num = m.group(1) != null ? m.group(1) : m.group(2);
+            keys.add("P" + digits(num));
+        }
+        return keys;
     }
 
     /** Yazılı tutar sayfa metninde geçiyor mu — biçim farkı (nokta/virgül) eşleşmeyi bozmaz. */

@@ -53,4 +53,37 @@ class ReportContractTest {
         assertThat(LanguageCheck.detect("28.984.491 63.551.075")).isNull();
         assertThat(LanguageCheck.detect("Operating profit 2024")).isNull();
     }
+
+    @Test
+    void rawTableRowIsNotEvidence() {
+        assertThat(ReportGate.looksLikeRawRow("Esas Faaliyet KARI (ZARARI) 28.984.491 63.551.075; Net Dönem Karı veya Zararı 38.863.566 70.826.085 .")).isTrue();
+        assertThat(ReportGate.looksLikeRawRow("Operating profit fell from 63,551,075 thousand TL to 28,984,491 thousand TL, a 54.4% decrease.")).isFalse();
+        assertThat(ReportGate.looksLikeRawRow("Sales to related parties constitute 80% of total sales (2023: 75%).")).isFalse();
+
+        var raw = new AuditResponse.Risk("Decline", "MEDIUM", "Operating profit and net income fell sharply in 2024.",
+                "Esas Faaliyet KARI (ZARARI) 28.984.491 63.551.075; Net Dönem Karı 38.863.566 70.826.085", List.of(13));
+        assertThat(ReportGate.gateRisk(raw).evidence()).isEqualTo("Operating profit and net income fell sharply in 2024.");
+        var hopeless = new AuditResponse.Risk("Decline", "MEDIUM", "28.984.491 63.551.075", "38.863.566 70.826.085", List.of(13));
+        assertThat(ReportGate.gateRisk(hopeless)).isNull();
+    }
+
+    @Test
+    void metricValueIsNumberAndUnitIsSeparate() {
+        var embedded = ReportGate.gateMetric(new AuditResponse.KeyMetric("Revenue", "594,995,138 thousand TL", "", ""));
+        assertThat(embedded.value()).isEqualTo("594,995,138");
+        assertThat(embedded.unit()).isEqualTo("thousand TL");
+
+        var pct = ReportGate.gateMetric(new AuditResponse.KeyMetric("Related party sales", "%80", "", ""));
+        assertThat(pct.value()).isEqualTo("80");
+        assertThat(pct.unit()).isEqualTo("%");
+
+        var date = ReportGate.gateMetric(new AuditResponse.KeyMetric("Period end", "31 Aralık 2024", "", ""));
+        assertThat(date.value()).isEqualTo("31 Aralık 2024");
+
+        var sentence = ReportGate.gateMetric(new AuditResponse.KeyMetric("Opinion", "The auditor issued an unqualified opinion on the statements.", "", ""));
+        assertThat(sentence).isNull();
+
+        var keepsGivenUnit = ReportGate.gateMetric(new AuditResponse.KeyMetric("Net income", "38.863.566", "bin TL", "x"));
+        assertThat(keepsGivenUnit.unit()).isEqualTo("bin TL");
+    }
 }

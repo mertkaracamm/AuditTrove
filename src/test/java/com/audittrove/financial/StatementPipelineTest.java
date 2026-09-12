@@ -134,6 +134,8 @@ class StatementPipelineTest {
         assertThat(NumberText.parse("(2.609,7)")).isEqualTo(-2609.7);
         assertThat(NumberText.parse("-8.799.018")).isEqualTo(-8799018.0);
         assertThat(NumberText.digits("28.984.491")).isEqualTo(NumberText.digits("28,984,491"));
+        assertThat(NumberText.parse("18 420,6")).isEqualTo(18420.6);
+        assertThat(NumberText.digitKeys("Hasılat 5 18 420,6 15 980,2")).contains("184206", "159802");
     }
 
     @Test

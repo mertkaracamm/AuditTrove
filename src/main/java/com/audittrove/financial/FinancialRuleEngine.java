@@ -30,7 +30,10 @@ public final class FinancialRuleEngine {
         if (statement == null || statement.isEmpty()) return Result.empty();
         List<AuditResponse.Risk> findings = new ArrayList<>();
         Set<LineItemKey> covered = EnumSet.noneOf(LineItemKey.class);
-        for (StatementVerifier.VerifiedItem item : statement.items()) {
+        // Sıra kalem tanımından gelir (faaliyet kârı, dönem kârı, giderler); çıkarımın sırasına bağlı değil.
+        List<StatementVerifier.VerifiedItem> ordered = new ArrayList<>(statement.items());
+        ordered.sort(java.util.Comparator.comparingInt(i -> i.key().ordinal()));
+        for (StatementVerifier.VerifiedItem item : ordered) {
             covered.add(item.key());
             double prev = Math.abs(item.previous());
             double cur = Math.abs(item.current());

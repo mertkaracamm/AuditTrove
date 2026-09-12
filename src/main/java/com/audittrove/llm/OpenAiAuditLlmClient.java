@@ -10,6 +10,7 @@ import com.audittrove.financial.StatementVerifier;
 import com.audittrove.rag.RegulationChunk;
 import com.audittrove.report.LanguageCheck;
 import com.audittrove.report.PageRefs;
+import com.audittrove.report.ReportGate;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -395,7 +396,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return new AuditResponse(processed.riskScore(), processed.scoreRationale(),
                 note + (processed.summary() == null ? "" : processed.summary()),
                 processed.risks(), processed.recommendations(), processed.keyMetrics(),
-                processed.advisorQuestions(), processed.references(), processed.language());
+                processed.advisorQuestions(), processed.references(), processed.language(), processed.pageCount());
     }
 
     // Belgeyi [REPORT PAGE n] sinirlarinda, ~CHUNK_CHARS'lik parcalara boler.
@@ -691,8 +692,14 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 claimed.retainAll(pages.keySet());
                 found = new ArrayList<>(claimed);
             }
+            AuditResponse.Risk gated = ReportGate.gateRisk(
+                    new AuditResponse.Risk(risk.title(), risk.severity(), fi.text(), ev.text(), found));
+            if (gated == null) {
+                log.warn("Bulgu kanit kapisindan gecemedi, dusuruldu: {}", risk.title());
+                continue;
+            }
             allPages.addAll(found);
-            groundedRisks.add(new AuditResponse.Risk(risk.title(), risk.severity(), fi.text(), ev.text(), found));
+            groundedRisks.add(gated);
         }
         // RAG kapaliyken referans listesini dogrulanmis sayfalardan uret
         if (context.isEmpty() && !allPages.isEmpty()) {
@@ -733,6 +740,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                         .toList();
         // Ayni metrigin iki formatla iki kart olmasini engelle
         // (or. "3.523 milyar TL" + "TL 3,5 trilyon" ayni deger).
+        // Biçim kapısı: değer sayı, birim ayrı; cümle olan değer düşer.
+        cleanMetrics = ReportGate.gateMetrics(cleanMetrics);
         cleanMetrics = dedupeMetrics(cleanMetrics);
         // Bulgulara uygulanan kural göstergelere de uygulanır: belgede geçmeyen sayı rapora giremez.
         cleanMetrics = groundMetrics(cleanMetrics, pages);
@@ -744,13 +753,79 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         questions = questions == null ? null : questions.stream().map(q -> PageRefs.strip(q).text()).toList();
 
         AuditResponse result = new AuditResponse(calibratedScore, rationale, summary,
-                groundedRisks, recommendations, cleanMetrics, questions, references, lang.code());
-        // Dil sözleşmesi: sapan alan varsa adıyla logla (karar vermez, görünür kılar).
+                groundedRisks, recommendations, cleanMetrics, questions, references, lang.code(), totalPages);
+        // Dil kapısı: yanlış dilde alan varsa önce çevrilir, hâlâ yanlışsa liste öğesi düşer.
         List<String> mixed = LanguageCheck.mismatches(result, lang);
         if (!mixed.isEmpty()) {
-            log.warn("Dil karisikligi ({} bekleniyor): {}", lang.code(), mixed);
+            log.warn("Dil karisikligi ({} bekleniyor): {} — onarim deneniyor", lang.code(), mixed);
+            result = repairLanguage(result, lang);
+            result = dropForeignItems(result, lang);
         }
         return result;
+    }
+
+    // Yanlış dildeki alanları tek çağrıda rapor diline çevirir; sayılar, tarihler, dipnot numaraları aynen kalır.
+    private AuditResponse repairLanguage(AuditResponse r, Lang lang) {
+        String name = lang.isTurkish() ? "Turkish" : "English";
+        // Sıra: summary, rationale, risk title/evidence/finding, recommendations, questions
+        List<String> fields = new ArrayList<>();
+        fields.add(r.summary()); fields.add(r.scoreRationale());
+        for (AuditResponse.Risk k : r.risks()) { fields.add(k.title()); fields.add(k.evidence()); fields.add(k.finding()); }
+        fields.addAll(r.recommendations());
+        fields.addAll(r.advisorQuestions());
+        try {
+            Map<String, Object> schema = Map.of(
+                    "type", "object", "additionalProperties", false,
+                    "required", List.of("items"),
+                    "properties", Map.of("items", Map.of("type", "array", "items", Map.of("type", "string"))));
+            Map<String, Object> body = Map.of(
+                    "model", model, "temperature", 0, "seed", 7,
+                    "response_format", Map.of("type", "json_schema", "json_schema",
+                            Map.of("name", "translation", "strict", true, "schema", schema)),
+                    "messages", List.of(
+                            Map.of("role", "system", "content", "Translate every string in the JSON array into " + name
+                                    + ". Keep numbers, dates, currency, percentages and note references exactly as written."
+                                    + " Strings already in " + name + " are returned unchanged. Return the same number of items in the same order."),
+                            Map.of("role", "user", "content", objectMapper.writeValueAsString(Map.of("items", fields)))));
+            JsonNode response = postToLlmWithRetry(body);
+            JsonNode items = objectMapper.readTree(response.at("/choices/0/message/content").asText()).path("items");
+            if (!items.isArray() || items.size() != fields.size()) return r;
+            int i = 0;
+            String summary = items.get(i++).asText();
+            String rationale = items.get(i++).asText();
+            List<AuditResponse.Risk> risks = new ArrayList<>();
+            for (AuditResponse.Risk k : r.risks()) {
+                String title = items.get(i++).asText(), evidence = items.get(i++).asText(), finding = items.get(i++).asText();
+                risks.add(new AuditResponse.Risk(title, k.severity(), finding, evidence, k.pages()));
+            }
+            List<String> recs = new ArrayList<>();
+            for (int n = 0; n < r.recommendations().size(); n++) recs.add(items.get(i++).asText());
+            List<String> qs = new ArrayList<>();
+            for (int n = 0; n < r.advisorQuestions().size(); n++) qs.add(items.get(i++).asText());
+            return new AuditResponse(r.riskScore(), rationale, summary, risks, recs, r.keyMetrics(), qs,
+                    r.references(), r.language(), r.pageCount());
+        } catch (Exception e) {
+            log.warn("Dil onarimi basarisiz: {}", e.toString());
+            return r;
+        }
+    }
+
+    // Onarımdan sonra hâlâ yanlış dilde kalan liste öğeleri düşer; özet ve gerekçe korunur.
+    private AuditResponse dropForeignItems(AuditResponse r, Lang lang) {
+        List<AuditResponse.Risk> risks = r.risks().stream()
+                .filter(k -> LanguageCheck.detect(k.evidence()) == null || LanguageCheck.detect(k.evidence()) == lang)
+                .filter(k -> LanguageCheck.detect(k.title()) == null || LanguageCheck.detect(k.title()) == lang)
+                .toList();
+        List<String> recs = r.recommendations().stream()
+                .filter(t -> LanguageCheck.detect(t) == null || LanguageCheck.detect(t) == lang).toList();
+        List<String> qs = r.advisorQuestions().stream()
+                .filter(t -> LanguageCheck.detect(t) == null || LanguageCheck.detect(t) == lang).toList();
+        if (risks.size() != r.risks().size() || recs.size() != r.recommendations().size() || qs.size() != r.advisorQuestions().size()) {
+            log.warn("Dil kapisi: {} bulgu, {} oneri, {} soru dusuruldu",
+                    r.risks().size() - risks.size(), r.recommendations().size() - recs.size(), r.advisorQuestions().size() - qs.size());
+        }
+        return new AuditResponse(calibrateScore(0, risks), r.scoreRationale(), r.summary(), risks, recs,
+                r.keyMetrics(), qs, r.references(), r.language(), r.pageCount());
     }
 
     // Parantezli karsilastirma serisini ("(2.609,7) (2.917,3) %11,8") tek okunur degere indir:
@@ -1127,9 +1202,12 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             if (YEAR_LIKE.matcher(tok).matches()) continue;
             if (key.length() >= 3 || decimal) anchors.add(key);
         }
+        anchors.addAll(NumberText.percentKeys(evidence));
         Map<Integer, Set<String>> pageKeys = new HashMap<>();
         for (Map.Entry<Integer, String> page : pages.entrySet()) {
-            pageKeys.put(page.getKey(), NumberText.digitKeys(page.getValue()));
+            Set<String> keys = new HashSet<>(NumberText.digitKeys(page.getValue()));
+            keys.addAll(NumberText.percentKeys(page.getValue()));
+            pageKeys.put(page.getKey(), keys);
         }
         // Tek sayfada geçen çıpa güçlü oy; hepsi çok sayfadaysa en çok oyu alan sayfa seçilir.
         SortedSet<Integer> strong = new TreeSet<>();
