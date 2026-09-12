@@ -75,6 +75,19 @@ class EvidenceLocatorTest {
     }
 
     @Test
+    void extraObservationOnTheSameLinesAsACountedFindingIsDropped() {
+        var risks = List.of(
+                new AuditResponse.Risk("Delay penalty", "MEDIUM", "f", "Late payment incurs 0.5% per day.", List.of(1), AuditResponse.Risk.RUBRIC, "kiranın %0,5'i oranında gecikme bedeli"),
+                new AuditResponse.Risk("Daily late fee", "MEDIUM", "f", "A daily fee of %0,5 applies when rent is late.", List.of(1), AuditResponse.Risk.MODEL, "gecikme bedeli uygulanır"),
+                new AuditResponse.Risk("Utilities on tenant", "LOW", "f", "Aidat, elektrik, su ve internet giderleri kiracıya aittir.", List.of(1), AuditResponse.Risk.MODEL, "giderleri kiracıya aittir"));
+        var r = new AuditResponse(60, "", "", risks, List.of(), List.of(), List.of(), List.of(), "en", 1);
+        var out = EvidenceLocator.annotate(r, Map.of(1, CONTRACT));
+        // Aynı satırlardaki ek gözlem düşer; başka satırdaki ek gözlem kalır.
+        assertThat(out.risks()).hasSize(2);
+        assertThat(out.risks().get(1).title()).isEqualTo("Utilities on tenant");
+    }
+
+    @Test
     void annotateAddsAnchorsPerPageAndKeepsRisksWithoutPages() {
         var risks = List.of(
                 new AuditResponse.Risk("Decline", "MEDIUM", "f", "Operating profit fell from 63,551,075 to 28,984,491.", List.of(13), AuditResponse.Risk.ENGINE),

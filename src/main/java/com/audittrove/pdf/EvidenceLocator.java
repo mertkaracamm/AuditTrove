@@ -46,11 +46,40 @@ public final class EvidenceLocator {
                 if (rects.isEmpty()) rects = locate(risk.finding(), page);
                 anchors.add(new AuditResponse.Anchor(p, rects));
             }
-            out.add(anchors.isEmpty() ? risk : risk.withAnchors(anchors));
+            AuditResponse.Risk anchored = anchors.isEmpty() ? risk : risk.withAnchors(anchors);
+            // Ek gözlem (skor dışı) sayılan bir bulguyla aynı satırlara oturuyorsa aynı konudur; düşer.
+            // Kelime benzerliği farklı cümlelerde kaçırır, belgedeki yer kaçırmaz.
+            if (anchored.isModel() && sharesLocationWithCounted(anchored, out)) continue;
+            out.add(anchored);
         }
         return new AuditResponse(response.riskScore(), response.scoreRationale(), response.summary(), out,
                 response.recommendations(), response.keyMetrics(), response.advisorQuestions(),
                 response.references(), response.language(), response.pageCount());
+    }
+
+    private static boolean sharesLocationWithCounted(AuditResponse.Risk candidate, List<AuditResponse.Risk> accepted) {
+        for (AuditResponse.Risk other : accepted) {
+            if (other.isModel()) continue;
+            for (AuditResponse.Anchor a : candidate.anchors()) {
+                for (AuditResponse.Anchor b : other.anchors()) {
+                    if (a.page() != b.page()) continue;
+                    for (AuditResponse.Rect ra : a.rects()) {
+                        for (AuditResponse.Rect rb : b.rects()) {
+                            if (overlapsVertically(ra, rb)) return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    // Dikeyde küçük olanın yarısından fazlası ortaksa aynı satırlardır.
+    private static boolean overlapsVertically(AuditResponse.Rect a, AuditResponse.Rect b) {
+        double top = Math.max(a.y(), b.y());
+        double bottom = Math.min(a.y() + a.h(), b.y() + b.h());
+        double common = bottom - top;
+        return common > 0 && common / Math.min(a.h(), b.h()) > 0.5;
     }
 
     /** Kanıt metninin sayfada geçtiği satırların dikdörtgenleri; ardışık satırlar tek dikdörtgende birleşir. */
