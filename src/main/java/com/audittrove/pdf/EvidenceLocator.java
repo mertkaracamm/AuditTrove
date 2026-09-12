@@ -39,7 +39,10 @@ public final class EvidenceLocator {
             for (Integer p : risk.pages()) {
                 PageText page = pages.get(p);
                 if (page == null) continue;
-                List<AuditResponse.Rect> rects = locate(risk.evidence(), page);
+                // Önce belgeden kelimesi kelimesine alıntı (belgenin dilinde, çeviriden etkilenmez),
+                // sonra kanıt cümlesi, en son bulgu metni.
+                List<AuditResponse.Rect> rects = locate(risk.quote(), page);
+                if (rects.isEmpty()) rects = locate(risk.evidence(), page);
                 if (rects.isEmpty()) rects = locate(risk.finding(), page);
                 anchors.add(new AuditResponse.Anchor(p, rects));
             }

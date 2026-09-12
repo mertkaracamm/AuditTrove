@@ -46,7 +46,7 @@ public final class ReportGate {
             if (finding.isEmpty()) return null;
             evidence = finding;
         }
-        return new AuditResponse.Risk(risk.title(), risk.severity(), finding, evidence, risk.pages(), risk.source());
+        return new AuditResponse.Risk(risk.title(), risk.severity(), finding, evidence, risk.pages(), risk.source(), risk.quote());
     }
 
     /**

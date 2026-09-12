@@ -97,6 +97,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             not be read reliably instead of guessing a value.
             Keep the output compact: at most 4 findings (the most material ones), finding text of at most
             2 sentences, evidence of 1 sentence, at most 3 recommendations. Brevity is part of quality.
+            Each finding also carries quote: the exact words from the document the evidence rests on, copied
+            verbatim in the document's own language (never translated or paraphrased), at most 15 words;
+            "" if the finding rests on a table row rather than a sentence.
             summary: 3 to 4 sentences. EVERY sentence must be verifiable against the document: it must
             either quote a figure, percentage or proper name exactly as printed in the document, or
             restate one of your findings. Do not write general or unsupported statements (e.g. "cash
@@ -689,10 +692,12 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             paraphrasing the document (translate if the document is in another language; do not quote
             verbatim in a different language), keeping numbers, dates, currency and note references exactly
             as printed, and the number inside the nearest preceding [REPORT PAGE n] marker as page.
-            For absent items evidence is "" and page 0.
+            For present items also give quote: the exact words from the document the answer rests on, copied
+            verbatim in the document's own language (do not translate, do not paraphrase), at most 15 words.
+            For absent items evidence and quote are "" and page 0.
             """;
 
-    private record RubricAnswer(String id, boolean present, String evidence, int page) {}
+    private record RubricAnswer(String id, boolean present, String evidence, String quote, int page) {}
     private record RubricResult(String documentKind, List<RubricAnswer> answers) {}
 
     // Birincil model cevaplar; ikincil modeller aynı soruları oylar. Bir madde ancak çoğunluk "var"
@@ -741,7 +746,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 if (best == null) continue;
                 List<Integer> pages = best.page() > 0 ? List.of(best.page()) : List.of();
                 out.add(new AuditResponse.Risk(item.title(lang), item.severity(), best.evidence().trim(),
-                        best.evidence().trim(), pages, AuditResponse.Risk.RUBRIC));
+                        best.evidence().trim(), pages, AuditResponse.Risk.RUBRIC, best.quote() == null ? "" : best.quote().trim()));
             }
             log.info("Kontrol listesi: tur={} parca={} bulgu={}", kind, chunks.size(), out.size());
             return out;
@@ -916,11 +921,12 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         List<String> kinds = Arrays.stream(RubricItem.Kind.values()).map(k -> k.name().toLowerCase(Locale.ROOT)).toList();
         Map<String, Object> answer = Map.of(
                 "type", "object", "additionalProperties", false,
-                "required", List.of("id", "present", "evidence", "page"),
+                "required", List.of("id", "present", "evidence", "quote", "page"),
                 "properties", Map.of(
                         "id", Map.of("type", "string", "enum", ids),
                         "present", Map.of("type", "boolean"),
                         "evidence", Map.of("type", "string"),
+                        "quote", Map.of("type", "string"),
                         "page", Map.of("type", "integer")));
         return Map.of(
                 "type", "object", "additionalProperties", false,
@@ -1035,7 +1041,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 if (overlapsAny(r, combined)) continue;
                 if (!rubric.isEmpty() && extras >= MAX_MODEL_FINDINGS) break;
                 combined.add(new AuditResponse.Risk(r.title(), r.severity(), r.finding(), r.evidence(), r.pages(),
-                        AuditResponse.Risk.MODEL));
+                        AuditResponse.Risk.MODEL, r.quote()));
                 extras++;
             }
             response = new AuditResponse(response.riskScore(), response.scoreRationale(),
@@ -1082,7 +1088,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 found = new ArrayList<>(claimed);
             }
             AuditResponse.Risk gated = ReportGate.gateRisk(
-                    new AuditResponse.Risk(risk.title(), risk.severity(), fi.text(), ev.text(), found, risk.source()));
+                    new AuditResponse.Risk(risk.title(), risk.severity(), fi.text(), ev.text(), found, risk.source(), risk.quote()));
             if (gated == null) {
                 log.warn("Bulgu kanit kapisindan gecemedi, dusuruldu: {}", risk.title());
                 continue;
@@ -1211,7 +1217,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             List<AuditResponse.Risk> risks = new ArrayList<>();
             for (AuditResponse.Risk k : r.risks()) {
                 String title = translated.get(i++), evidence = translated.get(i++), finding = translated.get(i++);
-                risks.add(new AuditResponse.Risk(title, k.severity(), finding, evidence, k.pages(), k.source()));
+                risks.add(new AuditResponse.Risk(title, k.severity(), finding, evidence, k.pages(), k.source(), k.quote()));
             }
             List<String> recs = new ArrayList<>();
             for (int n = 0; n < r.recommendations().size(); n++) recs.add(translated.get(i++));
@@ -1731,12 +1737,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         Map<String, Object> risk = Map.of(
                 "type", "object",
                 "additionalProperties", false,
-                "required", List.of("title", "severity", "finding", "evidence"),
+                "required", List.of("title", "severity", "finding", "evidence", "quote"),
                 "properties", Map.of(
                         "title", Map.of("type", "string"),
                         "severity", Map.of("type", "string", "enum", List.of("LOW", "MEDIUM", "HIGH", "CRITICAL")),
                         "finding", Map.of("type", "string"),
-                        "evidence", Map.of("type", "string")));
+                        "evidence", Map.of("type", "string"),
+                        "quote", Map.of("type", "string")));
         Map<String, Object> reference = Map.of(
                 "type", "object",
                 "additionalProperties", false,
@@ -1870,7 +1877,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             AuditResponse.Risk chosen = severityRank(ra.severity()) <= severityRank(rb.severity()) ? ra : rb;
             String prefix = lang.isTurkish() ? CROSS_PREFIX_TR : CROSS_PREFIX_EN;
             additions.add(new AuditResponse.Risk(prefix + chosen.title(), chosen.severity(),
-                    chosen.finding(), chosen.evidence(), chosen.pages()));
+                    chosen.finding(), chosen.evidence(), chosen.pages(), AuditResponse.Risk.MODEL, chosen.quote()));
             if (additions.size() >= 3) break;
         }
         log.info("Konsensus ozeti: birincil={} bulgu, tutulan={}, elenen={}, eklenen={}",

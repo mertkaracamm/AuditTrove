@@ -39,28 +39,34 @@ public record AuditResponse(
      * serbest gözlemi; skora girmez, arayüz "ek gözlem" olarak ayırır).
      */
     public record Risk(String title, String severity, String finding, String evidence, List<Integer> pages, String source,
-                       List<Anchor> anchors) {
+                       String quote, List<Anchor> anchors) {
         public static final String ENGINE = "engine";
         public static final String RUBRIC = "rubric";
         public static final String MODEL = "model";
 
+        /** quote: kanıtın dayandığı, belgeden kelimesi kelimesine alınmış kısa parça (belgenin kendi dilinde). Sayfa üzerinde yer bulmak için kullanılır. */
         @JsonCreator
         public Risk {
             pages = pages == null ? List.of() : List.copyOf(pages);
             source = source == null || source.isBlank() ? MODEL : source;
+            quote = quote == null ? "" : quote;
             anchors = anchors == null ? List.of() : List.copyOf(anchors);
         }
 
+        public Risk(String title, String severity, String finding, String evidence, List<Integer> pages, String source, String quote) {
+            this(title, severity, finding, evidence, pages, source, quote, List.of());
+        }
+
         public Risk(String title, String severity, String finding, String evidence, List<Integer> pages, String source) {
-            this(title, severity, finding, evidence, pages, source, List.of());
+            this(title, severity, finding, evidence, pages, source, "", List.of());
         }
 
         public Risk(String title, String severity, String finding, String evidence) {
-            this(title, severity, finding, evidence, List.of(), MODEL, List.of());
+            this(title, severity, finding, evidence, List.of(), MODEL, "", List.of());
         }
 
         public Risk(String title, String severity, String finding, String evidence, List<Integer> pages) {
-            this(title, severity, finding, evidence, pages, MODEL, List.of());
+            this(title, severity, finding, evidence, pages, MODEL, "", List.of());
         }
 
         public boolean isModel() {
@@ -68,7 +74,7 @@ public record AuditResponse(
         }
 
         public Risk withAnchors(List<Anchor> anchors) {
-            return new Risk(title, severity, finding, evidence, pages, source, anchors);
+            return new Risk(title, severity, finding, evidence, pages, source, quote, anchors);
         }
     }
 
