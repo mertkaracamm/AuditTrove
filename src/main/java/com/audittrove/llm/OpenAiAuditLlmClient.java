@@ -585,9 +585,11 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             You are answering a fixed checklist about a document. First classify the document kind.
             Then, for EVERY checklist item, answer present=true only if the document itself explicitly
             supports it; otherwise present=false. Never infer from general knowledge.
-            For present items give a short evidence sentence that paraphrases or quotes the document,
-            keeping numbers, dates, currency and note references exactly as printed, and the number inside
-            the nearest preceding [REPORT PAGE n] marker as page. For absent items evidence is "" and page 0.
+            For present items give ONE short evidence sentence written in the OUTPUT LANGUAGE given below,
+            paraphrasing the document (translate if the document is in another language; do not quote
+            verbatim in a different language), keeping numbers, dates, currency and note references exactly
+            as printed, and the number inside the nearest preceding [REPORT PAGE n] marker as page.
+            For absent items evidence is "" and page 0.
             Items that belong to a different document kind than the one you classified must be present=false.
             """;
 
@@ -882,43 +884,54 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     }
 
     // Yanlış dildeki alanları tek çağrıda rapor diline çevirir; sayılar, tarihler, dipnot numaraları aynen kalır.
+    // Şema alan başına sabit anahtar (t0..tN) taşır; model öğe birleştirip sayıyı bozamaz.
     private AuditResponse repairLanguage(AuditResponse r, Lang lang) {
         String name = lang.isTurkish() ? "Turkish" : "English";
-        // Sıra: summary, rationale, risk title/evidence/finding, recommendations, questions
         List<String> fields = new ArrayList<>();
         fields.add(r.summary()); fields.add(r.scoreRationale());
         for (AuditResponse.Risk k : r.risks()) { fields.add(k.title()); fields.add(k.evidence()); fields.add(k.finding()); }
         fields.addAll(r.recommendations());
         fields.addAll(r.advisorQuestions());
         try {
-            Map<String, Object> schema = Map.of(
-                    "type", "object", "additionalProperties", false,
-                    "required", List.of("items"),
-                    "properties", Map.of("items", Map.of("type", "array", "items", Map.of("type", "string"))));
+            Map<String, Object> props = new LinkedHashMap<>();
+            Map<String, Object> input = new LinkedHashMap<>();
+            List<String> keys = new ArrayList<>();
+            for (int i = 0; i < fields.size(); i++) {
+                String key = "t" + i;
+                keys.add(key);
+                props.put(key, Map.of("type", "string"));
+                input.put(key, fields.get(i) == null ? "" : fields.get(i));
+            }
+            Map<String, Object> schema = Map.of("type", "object", "additionalProperties", false,
+                    "required", keys, "properties", props);
             Map<String, Object> body = Map.of(
                     "model", model, "temperature", 0, "seed", 7,
                     "response_format", Map.of("type", "json_schema", "json_schema",
                             Map.of("name", "translation", "strict", true, "schema", schema)),
                     "messages", List.of(
-                            Map.of("role", "system", "content", "Translate every string in the JSON array into " + name
+                            Map.of("role", "system", "content", "Translate the value of every key into " + name
                                     + ". Keep numbers, dates, currency, percentages and note references exactly as written."
-                                    + " Strings already in " + name + " are returned unchanged. Return the same number of items in the same order."),
-                            Map.of("role", "user", "content", objectMapper.writeValueAsString(Map.of("items", fields)))));
+                                    + " Values already in " + name + " are returned unchanged. Return every key."),
+                            Map.of("role", "user", "content", objectMapper.writeValueAsString(input))));
             JsonNode response = postToLlmWithRetry(body);
-            JsonNode items = objectMapper.readTree(response.at("/choices/0/message/content").asText()).path("items");
-            if (!items.isArray() || items.size() != fields.size()) return r;
+            JsonNode out = objectMapper.readTree(response.at("/choices/0/message/content").asText());
+            List<String> translated = new ArrayList<>();
+            for (String key : keys) {
+                JsonNode v = out.get(key);
+                translated.add(v == null || v.isNull() ? fields.get(translated.size()) : v.asText());
+            }
             int i = 0;
-            String summary = items.get(i++).asText();
-            String rationale = items.get(i++).asText();
+            String summary = translated.get(i++);
+            String rationale = translated.get(i++);
             List<AuditResponse.Risk> risks = new ArrayList<>();
             for (AuditResponse.Risk k : r.risks()) {
-                String title = items.get(i++).asText(), evidence = items.get(i++).asText(), finding = items.get(i++).asText();
+                String title = translated.get(i++), evidence = translated.get(i++), finding = translated.get(i++);
                 risks.add(new AuditResponse.Risk(title, k.severity(), finding, evidence, k.pages(), k.source()));
             }
             List<String> recs = new ArrayList<>();
-            for (int n = 0; n < r.recommendations().size(); n++) recs.add(items.get(i++).asText());
+            for (int n = 0; n < r.recommendations().size(); n++) recs.add(translated.get(i++));
             List<String> qs = new ArrayList<>();
-            for (int n = 0; n < r.advisorQuestions().size(); n++) qs.add(items.get(i++).asText());
+            for (int n = 0; n < r.advisorQuestions().size(); n++) qs.add(translated.get(i++));
             return new AuditResponse(r.riskScore(), rationale, summary, risks, recs, r.keyMetrics(), qs,
                     r.references(), r.language(), r.pageCount());
         } catch (Exception e) {
