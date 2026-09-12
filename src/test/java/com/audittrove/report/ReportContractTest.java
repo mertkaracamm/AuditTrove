@@ -22,6 +22,10 @@ class ReportContractTest {
         assertThat(PageRefs.strip("Net borç arttı (Rapor Sayfa 8)").pages()).containsExactly(8);
         assertThat(PageRefs.strip("Costs rose (Report Page 10) and (pp. 12-13)").pages()).containsExactly(10, 12, 13);
         assertThat(PageRefs.strip("Costs rose [report page 3, 9]").pages()).containsExactly(3, 9);
+        assertThat(PageRefs.strip("Sürekliliğe dikkat çekilir (Sayfa 2 ve 3)").pages()).containsExactly(2, 3);
+        assertThat(PageRefs.strip("Finansman gideri arttı (Rapor Sayfası 1)").pages()).containsExactly(1);
+        assertThat(PageRefs.strip("Covenant breached (Page 2 of 2)").pages()).containsExactly(2);
+        assertThat(PageRefs.strip("Covenant breached (Pages 1 and 2)").text()).isEqualTo("Covenant breached");
     }
 
     @Test

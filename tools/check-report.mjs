@@ -59,7 +59,18 @@ async function registerDevice() {
   return (await res.json()).token;
 }
 
+// Ağ kopması (fetch failed) test sonucu değildir; yükleme iki kez denenir.
 async function runAudit(token, file, lang) {
+  try {
+    return await runAuditOnce(token, file, lang);
+  } catch (e) {
+    if (!/fetch failed|ECONN|ETIMEDOUT|socket/i.test(e.message)) throw e;
+    await new Promise((r) => setTimeout(r, 5000));
+    return await runAuditOnce(token, file, lang);
+  }
+}
+
+async function runAuditOnce(token, file, lang) {
   const fd = new FormData();
   fd.append('language', lang);
   fd.append('documentType', DOC_TYPE);
@@ -70,7 +81,12 @@ async function runAudit(token, file, lang) {
   const { id } = await res.json();
   for (let i = 0; i < 90; i++) {
     await new Promise((r) => setTimeout(r, 4000));
-    const poll = await fetch(`${BASE}/api/v1/audit/jobs/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+    let poll;
+    try {
+      poll = await fetch(`${BASE}/api/v1/audit/jobs/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+    } catch (e) {
+      continue; // geçici ağ hatası → sonraki tur
+    }
     if (poll.status === 404) throw new Error('iş kayboldu (404) — sunucu yeniden başladı mı?');
     const data = await poll.json();
     if (data.status === 'DONE') return { result: data.result, ms: Date.now() - started };

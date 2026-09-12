@@ -18,11 +18,12 @@ public final class PageRefs {
 
     // [REPORT PAGE 5], [REPORT PAGES 5-6], [REPORT PAGE 5, 6], [Report page 5 – 7]
     private static final Pattern BRACKET = Pattern.compile(
-            "\\[\\s*REPORT\\s+PAGES?\\s*([0-9]+(?:\\s*[-–,]\\s*[0-9]+)*)\\s*\\]", Pattern.CASE_INSENSITIVE);
+            "\\[\\s*REPORT\\s+PAGES?\\s*([0-9]+(?:\\s*(?:[-–,]|ve|and|&)\\s*[0-9]+)*)\\s*\\]", Pattern.CASE_INSENSITIVE);
     // (Page 5), (Pages 5-6), (Report Page 8), (Sayfa 5, 11), (Rapor Sayfa 8), (S. 5), (p. 5), (pp. 5-6)
     private static final Pattern PAREN = Pattern.compile(
-            "\\(\\s*(?:Rapor\\s+)?(?:Report\\s+)?(?:Sayfa|Pages?|S\\.|pp?\\.)\\s*([0-9]+(?:\\s*[-–,]\\s*[0-9]+)*)\\s*\\)",
-            Pattern.CASE_INSENSITIVE);
+            "\\(\\s*(?:Rapor\\s+)?(?:Report\\s+)?(?:Sayfa(?:sı|lar|ları|larda)?|Pages?|S\\.|pp?\\.)\\s*"
+            + "([0-9]+(?:\\s*(?:[-–,]|ve|and|&)\\s*[0-9]+)*)(?:\\s*(?:of|/)\\s*[0-9]+)?\\s*\\)",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     private static final Pattern NUMBER = Pattern.compile("[0-9]+");
     private static final Pattern RANGE = Pattern.compile("([0-9]+)\\s*[-–]\\s*([0-9]+)");
     // Aralık makul olmalı; "3-40" gibi bir şey atıf değil gürültüdür, uçları alınır.

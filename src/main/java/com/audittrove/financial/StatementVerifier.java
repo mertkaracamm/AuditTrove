@@ -21,7 +21,12 @@ public final class StatementVerifier {
     private static final Set<String> SCALES = Set.of("units", "thousand", "million", "billion");
 
     /** Doğrulanmış kalem: artık sayı, sayfa da belgede bulunduğu yer. */
-    public record VerifiedItem(LineItemKey key, String label, double current, double previous, int page) {}
+    public record VerifiedItem(LineItemKey key, String label, double current, double previous, int page,
+                               String currentKey, String previousKey) {
+        public VerifiedItem(LineItemKey key, String label, double current, double previous, int page) {
+            this(key, label, current, previous, page, "", "");
+        }
+    }
 
     public record VerifiedStatement(StatementExtraction.Unit unit, List<VerifiedItem> items) {
         public boolean isEmpty() {
@@ -51,9 +56,31 @@ public final class StatementVerifier {
             int page = locate(item, keysByPage);
             if (page < 0) continue;
             if (!columnOrderConsistent(item, pages.get(page), extraction.periods())) continue;
-            out.add(new VerifiedItem(key, item.label(), cur, prev, page));
+            out.add(new VerifiedItem(key, item.label(), cur, prev, page,
+                    NumberText.digits(item.current()), NumberText.digits(item.previous())));
         }
-        return new VerifiedStatement(cleanUnit(extraction.unit()), List.copyOf(out));
+        return new VerifiedStatement(cleanUnit(extraction.unit()), canonicalPage(out, keysByPage));
+    }
+
+    // Aynı tutar birden fazla sayfada geçebilir (bilanço + gelir tablosu). Kalemlerin çoğunluğunun
+    // bulunduğu sayfa gelir tablosudur; sayıları orada da geçen her kalem o sayfaya bağlanır.
+    private static List<VerifiedItem> canonicalPage(List<VerifiedItem> items, Map<Integer, Set<String>> keysByPage) {
+        if (items.size() < 2) return List.copyOf(items);
+        Map<Integer, Integer> votes = new HashMap<>();
+        for (VerifiedItem it : items) votes.merge(it.page(), 1, Integer::sum);
+        int statementPage = votes.entrySet().stream()
+                .max(Map.Entry.<Integer, Integer>comparingByValue().thenComparing(Map.Entry.comparingByKey()))
+                .map(Map.Entry::getKey).orElse(-1);
+        Set<String> keys = keysByPage.getOrDefault(statementPage, Set.of());
+        List<VerifiedItem> out = new ArrayList<>();
+        for (VerifiedItem it : items) {
+            boolean there = keys.contains(it.currentKey()) && keys.contains(it.previousKey());
+            out.add(it.page() != statementPage && there
+                    ? new VerifiedItem(it.key(), it.label(), it.current(), it.previous(), statementPage,
+                                       it.currentKey(), it.previousKey())
+                    : it);
+        }
+        return List.copyOf(out);
     }
 
     // Her iki tutar da aynı sayfada geçmeli. Önce söylenen sayfaya, sonra tüm sayfalara bakılır.

@@ -84,6 +84,18 @@ class StatementPipelineTest {
     }
 
     @Test
+    void allItemsAnchorToTheStatementPageWhenNumbersAppearThere() {
+        // Net kâr bilançoda (s.12) da geçiyor; çıkarım orayı söylese bile gelir tablosu sayfasına (13) bağlanır.
+        var pages = Map.of(12, "Özkaynaklar ... Dönem Net Kârı 40.000.000 70.000.000", 13, PAGE_13);
+        var ex = new StatementExtraction(true, THOUSAND_TRY, PERIODS, List.of(
+                item("operating_profit", "30,000,000", "60,000,000", 13),
+                item("finance_costs", "-35,000,000", "-43,000,000", 13),
+                item("net_profit", "40,000,000", "70,000,000", 12)));
+        var verified = StatementVerifier.verify(ex, pages);
+        assertThat(verified.items()).extracting(StatementVerifier.VerifiedItem::page).containsExactly(13, 13, 13);
+    }
+
+    @Test
     void numberNotInDocumentIsDropped() {
         var ex = new StatementExtraction(true, THOUSAND_TRY, PERIODS, List.of(
                 item("operating_profit", "31,000,000", "60,000,000", 13)));

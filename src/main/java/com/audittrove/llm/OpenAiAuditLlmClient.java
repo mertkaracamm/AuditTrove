@@ -756,11 +756,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 groundedRisks, recommendations, cleanMetrics, questions, references, lang.code(), totalPages);
         // Dil kapısı: yanlış dilde alan varsa önce çevrilir, hâlâ yanlışsa liste öğesi düşer.
         List<String> mixed = LanguageCheck.mismatches(result, lang);
-        if (!mixed.isEmpty()) {
-            log.warn("Dil karisikligi ({} bekleniyor): {} — onarim deneniyor", lang.code(), mixed);
+        for (int attempt = 1; attempt <= 2 && !mixed.isEmpty(); attempt++) {
+            log.warn("Dil karisikligi ({} bekleniyor): {} — onarim {}/2", lang.code(), mixed, attempt);
             result = repairLanguage(result, lang);
-            result = dropForeignItems(result, lang);
+            mixed = LanguageCheck.mismatches(result, lang);
         }
+        // Bulgu düşürülmez: yanlış dilde bulgu, sahte "temiz" rapordan iyidir. Kalan sapma loglanır.
+        if (!mixed.isEmpty()) log.error("Dil kapisi: onarim sonrasi hala yanlis dilde: {}", mixed);
         return result;
     }
 
@@ -808,24 +810,6 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             log.warn("Dil onarimi basarisiz: {}", e.toString());
             return r;
         }
-    }
-
-    // Onarımdan sonra hâlâ yanlış dilde kalan liste öğeleri düşer; özet ve gerekçe korunur.
-    private AuditResponse dropForeignItems(AuditResponse r, Lang lang) {
-        List<AuditResponse.Risk> risks = r.risks().stream()
-                .filter(k -> LanguageCheck.detect(k.evidence()) == null || LanguageCheck.detect(k.evidence()) == lang)
-                .filter(k -> LanguageCheck.detect(k.title()) == null || LanguageCheck.detect(k.title()) == lang)
-                .toList();
-        List<String> recs = r.recommendations().stream()
-                .filter(t -> LanguageCheck.detect(t) == null || LanguageCheck.detect(t) == lang).toList();
-        List<String> qs = r.advisorQuestions().stream()
-                .filter(t -> LanguageCheck.detect(t) == null || LanguageCheck.detect(t) == lang).toList();
-        if (risks.size() != r.risks().size() || recs.size() != r.recommendations().size() || qs.size() != r.advisorQuestions().size()) {
-            log.warn("Dil kapisi: {} bulgu, {} oneri, {} soru dusuruldu",
-                    r.risks().size() - risks.size(), r.recommendations().size() - recs.size(), r.advisorQuestions().size() - qs.size());
-        }
-        return new AuditResponse(calibrateScore(0, risks), r.scoreRationale(), r.summary(), risks, recs,
-                r.keyMetrics(), qs, r.references(), r.language(), r.pageCount());
     }
 
     // Parantezli karsilastirma serisini ("(2.609,7) (2.917,3) %11,8") tek okunur degere indir:
@@ -1193,6 +1177,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         if (evidence == null || pages.isEmpty()) {
             return List.of();
         }
+        // Tek sayfalık belgede aranacak bir şey yok.
+        if (pages.size() == 1) return List.copyOf(pages.keySet());
         Set<String> anchors = new LinkedHashSet<>();
         Matcher m = ANCHOR_TOKEN.matcher(evidence);
         while (m.find()) {
@@ -1223,11 +1209,31 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         if (!strong.isEmpty()) {
             return List.copyOf(strong);
         }
-        return votes.entrySet().stream()
+        List<Integer> byVote = votes.entrySet().stream()
                 .max(Map.Entry.<Integer, Integer>comparingByValue()
                         .thenComparing(Map.Entry.comparingByKey(Comparator.reverseOrder())))
                 .map(e -> List.of(e.getKey()))
                 .orElse(List.of());
+        return byVote.isEmpty() ? groundByWords(evidence, pages) : byVote;
+    }
+
+    // Sayı yoksa (sözleşme maddeleri) kanıt cümlesinin ayırt edici kelimeleri en çok hangi sayfada
+    // geçiyorsa bulgu o sayfaya bağlanır; en az üç kelime eşleşmezse sayfa verilmez.
+    private static final Pattern WORD_TOKEN = Pattern.compile("\\p{L}{5,}");
+
+    private List<Integer> groundByWords(String evidence, Map<Integer, String> pages) {
+        Set<String> words = new HashSet<>();
+        Matcher m = WORD_TOKEN.matcher(evidence.toLowerCase(Locale.forLanguageTag("tr")));
+        while (m.find()) words.add(m.group());
+        if (words.size() < 3) return List.of();
+        int bestPage = -1, best = 0;
+        for (Map.Entry<Integer, String> page : pages.entrySet()) {
+            String text = page.getValue().toLowerCase(Locale.forLanguageTag("tr"));
+            int hits = 0;
+            for (String w : words) if (text.contains(w)) hits++;
+            if (hits > best || (hits == best && hits > 0 && page.getKey() < bestPage)) { best = hits; bestPage = page.getKey(); }
+        }
+        return best >= 3 ? List.of(bestPage) : List.of();
     }
 
     // skor, bulgu siddet dagilimiyla ayni bantta kalsin
