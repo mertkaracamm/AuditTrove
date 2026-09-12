@@ -226,11 +226,12 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OpenAiAuditLlmClient.class);
     private final List<SecondaryBackend> secondaryBackends;
     private final boolean multiModelEnabled;
-    // Bir inceleme aynı anda dört ikincil çağrı açar (iki çapraz kontrol, iki kontrol listesi oyu);
-    // iki inceleme çakışsa da sıra beklemesin.
-    private final ExecutorService crossCheckExecutor = Executors.newFixedThreadPool(8);
+    // Tüm LLM çağrıları ağ beklemesidir; sabit havuz iç içe bekleyen görevlerde kilitlenebilir.
+    // Bu yüzden ikincil oylar, parçalar ve yan işler sınırsız havuzda koşar; eşzamanlılığı parça sayısı belirler.
+    private final ExecutorService crossCheckExecutor = Executors.newCachedThreadPool();
+    private final ExecutorService fanOutExecutor = Executors.newCachedThreadPool();
     // Çıkarım ve kontrol listesi ana incelemeye paralel koşar; hiçbiri diğerinin sonucuna bağlı değil.
-    private final ExecutorService sideTaskExecutor = Executors.newFixedThreadPool(4);
+    private final ExecutorService sideTaskExecutor = Executors.newCachedThreadPool();
     // Ek gözlemler skora girmez; birincil bittikten sonra ikincillere bu kadar beklenir.
     private static final int CROSS_GRACE_SECONDS = 10;
     private volatile String schemaJsonCache;
@@ -380,8 +381,16 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         List<String> partialSummaries = new ArrayList<>();
         int maxScore = 0;
 
+        // Yan işler ve tüm parçalar aynı anda başlar; süre en uzun parçanınki kadar olur, toplamı değil.
+        String fullText = String.join("", chunks);
+        SideTasks side = startSideTasks(fullText, lang, documentType);
+        List<CompletableFuture<AuditResponse>> partFutures = new ArrayList<>();
         for (String chunk : chunks) {
-            AuditResponse part = auditSingleCross(chunk, context, lang, documentType);
+            partFutures.add(CompletableFuture.supplyAsync(
+                    () -> auditSingleCross(chunk, context, lang, documentType), fanOutExecutor));
+        }
+        for (CompletableFuture<AuditResponse> f : partFutures) {
+            AuditResponse part = f.join();
             if (part.risks() != null) allRisks.addAll(part.risks());
             if (part.recommendations() != null) allRecommendations.addAll(part.recommendations());
             if (part.keyMetrics() != null) allMetrics.addAll(part.keyMetrics());
@@ -405,8 +414,6 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 mergedRisks, mergedRecs, mergedMetrics, mergedQuestions, List.of());
 
         // Butun belge metnini birlestirip sayfa dogrulama + skor kelepcesi + standart kilidini uygula
-        String fullText = String.join("", chunks);
-        SideTasks side = startSideTasks(fullText, lang, documentType);
         AuditResponse processed = postProcess(merged, context, fullText, lang, documentType, false, totalPages, totalPages, side);
 
         // Cok parcali oldugunu ozete deterministik olarak not dus.
@@ -541,33 +548,42 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
     // Belge tek çağrıya sığmıyorsa parça parça denenir; tabloyu içeren ilk parça yeterlidir.
     // Çıkarım başarısız olursa inceleme düşmez, yalnızca kural katmanı devreye girmez.
+    // Uzun belgede parçalar aynı anda okunur; gelir tablosunu bulan ilk parça (belge sırasıyla) kazanır.
     private StatementExtraction extractStatement(String documentText) {
+        List<CompletableFuture<StatementExtraction>> perChunk = new ArrayList<>();
         for (String chunk : splitIntoChunks(documentText)) {
-            try {
-                Map<String, Object> body = Map.of(
-                        "model", model,
-                        "temperature", 0,
-                        "seed", 7,
-                        "response_format", Map.of(
-                                "type", "json_schema",
-                                "json_schema", Map.of(
-                                        "name", "income_statement_extraction",
-                                        "strict", true,
-                                        "schema", extractionSchema())),
-                        "messages", List.of(
-                                Map.of("role", "system", "content", EXTRACTION_PROMPT),
-                                Map.of("role", "user", "content", chunk)));
-                JsonNode response = postToLlmWithRetry(body);
-                String content = response.at("/choices/0/message/content").asText();
-                if (content.isBlank()) continue;
-                StatementExtraction extraction = objectMapper.readValue(content, StatementExtraction.class);
-                if (extraction.found() && !extraction.items().isEmpty()) return extraction;
-            } catch (Exception e) {
-                log.warn("Gelir tablosu cikarimi basarisiz, kural katmani atlaniyor: {}", e.toString());
-                return StatementExtraction.none();
-            }
+            perChunk.add(CompletableFuture.supplyAsync(() -> extractFromChunk(chunk), fanOutExecutor));
+        }
+        for (CompletableFuture<StatementExtraction> f : perChunk) {
+            StatementExtraction extraction = f.join();
+            if (extraction.found() && !extraction.items().isEmpty()) return extraction;
         }
         return StatementExtraction.none();
+    }
+
+    private StatementExtraction extractFromChunk(String chunk) {
+        try {
+            Map<String, Object> body = Map.of(
+                    "model", model,
+                    "temperature", 0,
+                    "seed", 7,
+                    "response_format", Map.of(
+                            "type", "json_schema",
+                            "json_schema", Map.of(
+                                    "name", "income_statement_extraction",
+                                    "strict", true,
+                                    "schema", extractionSchema())),
+                    "messages", List.of(
+                            Map.of("role", "system", "content", EXTRACTION_PROMPT),
+                            Map.of("role", "user", "content", chunk)));
+            JsonNode response = postToLlmWithRetry(body);
+            String content = response.at("/choices/0/message/content").asText();
+            if (content.isBlank()) return StatementExtraction.none();
+            return objectMapper.readValue(content, StatementExtraction.class);
+        } catch (Exception e) {
+            log.warn("Gelir tablosu cikarimi basarisiz, kural katmani atlaniyor: {}", e.toString());
+            return StatementExtraction.none();
+        }
     }
 
     private Map<String, Object> extractionSchema() {
@@ -630,12 +646,56 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // dediyse bulgu olur — sınırdaki maddelerin koşudan koşuya değişmesini oylama söndürür.
     private List<AuditResponse.Risk> rubricFindings(String documentText, Lang lang, String documentType) {
         try {
-            String chunk = splitIntoChunks(documentText).get(0);
             // Kontrol listesi her zaman İngilizce cevaplanır: var/yok kararı rapor diline bağlı olmasın.
             // Kanıt cümleleri sonda dil kapısı tarafından rapor diline çevrilir.
             String system = RUBRIC_PROMPT + rubricQuestions() + languageInstruction(Lang.EN);
-            // İkincil oylar birincil cevap beklenmeden başlar; üç model aynı anda okur.
-            List<CompletableFuture<RubricResult>> secondary = startRubricSecondaryVotes(system, chunk);
+            // Uzun belgede her parça ayrı oylanır ve hepsi aynı anda başlar; madde herhangi bir parçada
+            // çoğunlukla "var" çıkarsa bulgu olur. Sürekliliğe ilişkin not 80. sayfadaysa da yakalanır.
+            List<String> chunks = splitIntoChunks(documentText);
+            List<CompletableFuture<List<RubricResult>>> perChunk = new ArrayList<>();
+            for (String chunk : chunks) {
+                perChunk.add(CompletableFuture.supplyAsync(() -> rubricVotes(system, chunk), fanOutExecutor));
+            }
+            List<List<RubricResult>> votesByChunk = new ArrayList<>();
+            for (CompletableFuture<List<RubricResult>> f : perChunk) votesByChunk.add(f.get());
+            if (votesByChunk.isEmpty() || votesByChunk.get(0).isEmpty()) return List.of();
+
+            RubricItem.Kind kind = kindFromDocumentType(documentType);
+            if (kind == null) kind = dominantKind(votesByChunk.get(0).get(0));
+            List<AuditResponse.Risk> out = new ArrayList<>();
+            for (RubricItem item : RubricItem.forKind(kind)) {
+                RubricAnswer best = null;
+                for (List<RubricResult> votes : votesByChunk) {
+                    int needed = votes.size() >= 3 ? 2 : 1; // üç oy varsa çoğunluk, yoksa birincil tek başına
+                    int yes = 0;
+                    RubricAnswer first = null;
+                    for (RubricResult vote : votes) {
+                        RubricAnswer a = answerFor(vote, item);
+                        if (a == null || !a.present() || a.evidence() == null || a.evidence().isBlank()) continue;
+                        yes++;
+                        if (first == null) first = a; // kanıt öncelikle birincilden
+                    }
+                    if (yes >= needed && first != null) { best = first; break; }
+                }
+                if (best == null) continue;
+                List<Integer> pages = best.page() > 0 ? List.of(best.page()) : List.of();
+                out.add(new AuditResponse.Risk(item.title(lang), item.severity(), best.evidence().trim(),
+                        best.evidence().trim(), pages, AuditResponse.Risk.RUBRIC));
+            }
+            log.info("Kontrol listesi: tur={} parca={} bulgu={}", kind, chunks.size(), out.size());
+            return out;
+        } catch (Exception e) {
+            log.warn("Kontrol listesi calismadi, LLM bulgulariyla devam: {}", e.toString());
+            return List.of();
+        }
+    }
+
+    // Bir parça için oylar: ikinciller birincille aynı anda başlar, birincil listenin başında döner.
+    // Birincil cevap veremezse parça oysuz kalır (boş liste).
+    private List<RubricResult> rubricVotes(String system, String chunk) {
+        List<CompletableFuture<RubricResult>> secondary = startRubricSecondaryVotes(system, chunk);
+        List<RubricResult> votes = new ArrayList<>();
+        try {
             Map<String, Object> body = Map.of(
                     "model", model, "temperature", 0, "seed", 7,
                     "response_format", Map.of("type", "json_schema", "json_schema",
@@ -644,35 +704,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                             Map.of("role", "system", "content", system),
                             Map.of("role", "user", "content", chunk)));
             JsonNode response = postToLlmWithRetry(body);
-            RubricResult primary = objectMapper.readValue(response.at("/choices/0/message/content").asText(), RubricResult.class);
-            List<RubricResult> votes = new ArrayList<>();
-            votes.add(primary);
-            votes.addAll(collectRubricSecondaryVotes(secondary));
-
-            RubricItem.Kind kind = kindFromDocumentType(documentType);
-            if (kind == null) kind = dominantKind(primary);
-            int needed = votes.size() >= 3 ? 2 : 1; // üç oy varsa çoğunluk, yoksa birincil tek başına
-            List<AuditResponse.Risk> out = new ArrayList<>();
-            for (RubricItem item : RubricItem.forKind(kind)) {
-                int yes = 0;
-                RubricAnswer best = null;
-                for (int v = 0; v < votes.size(); v++) {
-                    RubricAnswer a = answerFor(votes.get(v), item);
-                    if (a == null || !a.present() || a.evidence() == null || a.evidence().isBlank()) continue;
-                    yes++;
-                    if (best == null) best = a; // kanıt öncelikle birincilden
-                }
-                if (yes < needed || best == null) continue;
-                List<Integer> pages = best.page() > 0 ? List.of(best.page()) : List.of();
-                out.add(new AuditResponse.Risk(item.title(lang), item.severity(), best.evidence().trim(),
-                        best.evidence().trim(), pages, AuditResponse.Risk.RUBRIC));
-            }
-            log.info("Kontrol listesi: tur={} oy={} bulgu={}", kind, votes.size(), out.size());
-            return out;
+            votes.add(objectMapper.readValue(response.at("/choices/0/message/content").asText(), RubricResult.class));
         } catch (Exception e) {
-            log.warn("Kontrol listesi calismadi, LLM bulgulariyla devam: {}", e.toString());
+            log.warn("Kontrol listesi birincil cevap alinamadi: {}", e.toString());
             return List.of();
         }
+        votes.addAll(collectRubricSecondaryVotes(secondary));
+        return votes;
     }
 
     private static RubricAnswer answerFor(RubricResult r, RubricItem item) {
