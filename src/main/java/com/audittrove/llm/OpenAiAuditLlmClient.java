@@ -221,7 +221,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OpenAiAuditLlmClient.class);
     private final List<SecondaryBackend> secondaryBackends;
     private final boolean multiModelEnabled;
-    private final ExecutorService crossCheckExecutor = Executors.newFixedThreadPool(2);
+    private final ExecutorService crossCheckExecutor = Executors.newFixedThreadPool(4);
+    // Çıkarım ve kontrol listesi ana incelemeye paralel koşar; hiçbiri diğerinin sonucuna bağlı değil.
+    private final ExecutorService sideTaskExecutor = Executors.newFixedThreadPool(2);
     private volatile String schemaJsonCache;
 
     public OpenAiAuditLlmClient(ObjectMapper objectMapper,
@@ -256,8 +258,28 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         if (chunks.size() > 1) {
             return auditChunked(chunks, context, lang, documentType, totalPages, includedPages, truncated);
         }
+        SideTasks side = startSideTasks(documentText, lang, documentType);
         AuditResponse single = auditSingleCross(documentText, context, lang, documentType);
-        return postProcess(single, context, documentText, lang, documentType, false, totalPages, includedPages);
+        return postProcess(single, context, documentText, lang, documentType, false, totalPages, includedPages, side);
+    }
+
+    // Belge metnine bağlı yan işler (gelir tablosu çıkarımı, kontrol listesi) ana inceleme sürerken çalışır.
+    private record SideTasks(CompletableFuture<StatementExtraction> extraction,
+                             CompletableFuture<List<AuditResponse.Risk>> rubric) {}
+
+    private SideTasks startSideTasks(String documentText, Lang lang, String documentType) {
+        return new SideTasks(
+                CompletableFuture.supplyAsync(() -> extractStatement(documentText), sideTaskExecutor),
+                CompletableFuture.supplyAsync(() -> rubricFindings(documentText, lang, documentType), sideTaskExecutor));
+    }
+
+    private static <T> T await(CompletableFuture<T> f, T fallback, String what) {
+        try {
+            return f.get(90, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("{} zamaninda gelmedi, atlaniyor: {}", what, e.toString());
+            return fallback;
+        }
     }
 
     // Tek bir metin blogunu tek LLM cagrisiyla degerlendirir (post-process yapmaz).
@@ -375,7 +397,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
         // Butun belge metnini birlestirip sayfa dogrulama + skor kelepcesi + standart kilidini uygula
         String fullText = String.join("", chunks);
-        AuditResponse processed = postProcess(merged, context, fullText, lang, documentType, false, totalPages, totalPages);
+        SideTasks side = startSideTasks(fullText, lang, documentType);
+        AuditResponse processed = postProcess(merged, context, fullText, lang, documentType, false, totalPages, totalPages, side);
 
         // Cok parcali oldugunu ozete deterministik olarak not dus.
         // Belge tavani astiysa (truncated) "butunuyle" DEME — dogru sekilde kismi inceleme belirt.
@@ -498,9 +521,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             """;
 
     // Belge tipine bakılmaz: gelir tablosu var mı yok mu, belgenin kendisi söyler (found=false → hiçbir şey olmaz).
-    private FinancialRuleEngine.Result financialRules(String documentText, Map<Integer, String> pages, Lang lang) {
-        if (pages.isEmpty()) return FinancialRuleEngine.Result.empty();
-        StatementExtraction extraction = extractStatement(documentText);
+    private FinancialRuleEngine.Result financialRules(StatementExtraction extraction, Map<Integer, String> pages, Lang lang) {
+        if (pages.isEmpty() || extraction == null) return FinancialRuleEngine.Result.empty();
         StatementVerifier.VerifiedStatement verified = StatementVerifier.verify(extraction, pages);
         FinancialRuleEngine.Result result = FinancialRuleEngine.evaluate(verified, lang);
         log.info("Gelir tablosu: cikarilan={} dogrulanan={} bulgu={}",
@@ -830,14 +852,15 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
     private AuditResponse postProcess(AuditResponse response, List<RegulationChunk> context,
                                       String documentText, Lang lang, String documentType,
-                                      boolean truncated, int totalPages, int includedPages) {
+                                      boolean truncated, int totalPages, int includedPages, SideTasks side) {
         Map<Integer, String> pages = splitPages(documentText);
         // 0) Gelir tablosu kalemleri: LLM okur, kod karar verir. Kodun cevap verdiği kalem hakkında
         //    LLM'in yazdığı serbest bulgu düşer; kalan LLM bulguları (yoğunlaşma, riskten korunma vb.) kalır.
-        FinancialRuleEngine.Result rules = financialRules(documentText, pages, lang);
+        FinancialRuleEngine.Result rules = financialRules(
+                await(side.extraction(), StatementExtraction.none(), "Gelir tablosu cikarimi"), pages, lang);
         // 0b) Kontrol listesi: belge tipine göre sabit sorular, sabit başlık ve önem. Skoru motor + rubrik
         //     belirler; LLM'in serbest bulguları "model" kaynaklı ek gözlem olarak kalır, en fazla iki tane.
-        List<AuditResponse.Risk> rubric = rubricFindings(documentText, lang, documentType);
+        List<AuditResponse.Risk> rubric = await(side.rubric(), List.of(), "Kontrol listesi");
         {
             List<AuditResponse.Risk> combined = new ArrayList<>(rules.findings());
             combined.addAll(rubric);

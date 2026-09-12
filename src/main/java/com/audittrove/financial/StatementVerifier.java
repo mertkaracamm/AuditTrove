@@ -59,7 +59,38 @@ public final class StatementVerifier {
             out.add(new VerifiedItem(key, item.label(), cur, prev, page,
                     NumberText.digits(item.current()), NumberText.digits(item.previous())));
         }
-        return new VerifiedStatement(cleanUnit(extraction.unit()), canonicalPage(out, keysByPage));
+        StatementExtraction.Unit unit = cleanUnit(extraction.unit());
+        if (unit == null) unit = declaredUnit(pages);
+        return new VerifiedStatement(unit, canonicalPage(out, keysByPage));
+    }
+
+    // Tablonun birim beyanı: "1.000 TL", "Bin TL", "TL Thousand", "in thousands of USD", "Milyon TL",
+    // "in millions of U.S. dollars", "'000". Çıkarım birim vermediyse buradan okunur; bulunamazsa birim yok.
+    private static final Pattern DECLARED_UNIT = Pattern.compile(
+            "(?i)(?:\\b(bin|thousand|thousands|'000|000s|milyon|million|millions|milyar|billion|billions)\\b[^\\n]{0,40}?\\b(TL|TRY|₺|USD|US\\$|\\$|dollars?|EUR|€|euros?|GBP|£|pounds?)\\b"
+            + "|\\b(TL|TRY|USD|EUR|GBP)\\s*(bin|thousand|milyon|million|milyar|billion)\\b"
+            + "|\\b1[.,]000\\s*(TL|TRY|USD|EUR|GBP)\\b)");
+
+    static StatementExtraction.Unit declaredUnit(Map<Integer, String> pages) {
+        for (String page : pages.values()) {
+            Matcher m = DECLARED_UNIT.matcher(page);
+            if (!m.find()) continue;
+            String scaleWord = m.group(1) != null ? m.group(1) : m.group(4) != null ? m.group(4) : "thousand";
+            String currencyWord = m.group(2) != null ? m.group(2) : m.group(3) != null ? m.group(3) : m.group(5);
+            String scale = switch (scaleWord.toLowerCase()) {
+                case "bin", "thousand", "thousands", "'000", "000s" -> "thousand";
+                case "milyon", "million", "millions" -> "million";
+                default -> "billion";
+            };
+            String currency = switch (currencyWord.toLowerCase()) {
+                case "tl", "try", "₺" -> "TRY";
+                case "usd", "us$", "$", "dollar", "dollars" -> "USD";
+                case "eur", "€", "euro", "euros" -> "EUR";
+                default -> "GBP";
+            };
+            return new StatementExtraction.Unit(currency, scale);
+        }
+        return null;
     }
 
     // Aynı tutar birden fazla sayfada geçebilir (bilanço + gelir tablosu). Kalemlerin çoğunluğunun

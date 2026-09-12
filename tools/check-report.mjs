@@ -111,7 +111,7 @@ function check(result, lang) {
   for (const [name, t] of texts) {
     const d = detectLang(t);
     if (d && d !== lang) f('dil', `${name} ${d} görünüyor: "${String(t).slice(0, 110)}"`);
-    if (/\[REPORT PAGE|\((Page|Sayfa|Rapor Sayfa|Report Page)\s*\d/i.test(t || '')) f('işaretçi', `${name} içinde sayfa atfı`);
+    if (/\[REPORT PAGE|\((Page|Sayfa|Rapor Sayfa|Report Page)\s*\d/i.test(t || '')) f('işaretçi', `${name} içinde sayfa atfı: "${String(t).slice(0, 140)}"`);
   }
   if (!result.summary || result.summary.length < 40) f('özet', 'boş ya da çok kısa');
 
@@ -204,11 +204,19 @@ const pad = (s, n) => String(s).padEnd(n);
         const scores = new Set(ok.map((x) => x.result.riskScore));
         if (scores.size > 1) { console.log(`    - tutarlılık: skor koşular arasında değişti ${[...scores].join(' / ')}`); totalFail++; }
         const eng = ok.map((x) => engineFindings(x.result).join('\n'));
-        if (new Set(eng).size > 1) { console.log('    - tutarlılık: motor bulguları koşular arasında farklı'); totalFail++; }
+        if (new Set(eng).size > 1) {
+          console.log('    - tutarlılık: motor bulguları koşular arasında farklı');
+          eng.forEach((e, i) => console.log(`        koşu ${i + 1}: ${e.replace(/\n/g, ' || ') || '(yok)'}`));
+          totalFail++;
+        }
         const counts = ok.map((x) => (x.result.risks || []).filter((r) => r.source !== 'model').length);
         if (Math.max(...counts) - Math.min(...counts) > 1) { console.log(`    - tutarlılık: skora giren bulgu sayısı ${counts.join(' / ')} (1'den fazla oynadı)`); totalFail++; }
         const rubricTitles = ok.map((x) => (x.result.risks || []).filter((r) => r.source === 'rubric').map((r) => r.title).sort().join('|'));
-        if (new Set(rubricTitles).size > 1) { console.log('    - tutarlılık: kontrol listesi bulguları koşular arasında farklı'); totalFail++; }
+        if (new Set(rubricTitles).size > 1) {
+          console.log('    - tutarlılık: kontrol listesi bulguları koşular arasında farklı');
+          rubricTitles.forEach((e, i) => console.log(`        koşu ${i + 1}: ${e.split('|').join(' | ')}`));
+          totalFail++;
+        }
       }
       if (ok.length) perLang[lang] = { score: ok[0].result.riskScore, counted: (ok[0].result.risks || []).filter((r) => r.source !== 'model').length };
     }

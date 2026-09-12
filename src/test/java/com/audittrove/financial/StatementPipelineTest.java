@@ -96,6 +96,18 @@ class StatementPipelineTest {
     }
 
     @Test
+    void unitFallsBackToTheDocumentsDeclaration() {
+        var noUnit = new StatementExtraction(true, null, PERIODS, goodExtraction().items());
+        assertThat(StatementVerifier.verify(noUnit, PAGES).unit()).isEqualTo(THOUSAND_TRY); // "Sunum Para Birimi 1.000 TL"
+        assertThat(StatementVerifier.declaredUnit(Map.of(1, "(in millions of U.S. dollars, except per share data)")))
+                .isEqualTo(new StatementExtraction.Unit("USD", "million"));
+        assertThat(StatementVerifier.declaredUnit(Map.of(1, "Tutarlar aksi belirtilmedikçe Milyon Türk Lirası olarak ifade edilmiştir")))
+                .isNull(); // "Türk Lirası" para birimi kalıbında değil; uydurmak yerine birimsiz kalır
+        assertThat(StatementVerifier.declaredUnit(Map.of(1, "Amounts in TL Thousand unless otherwise stated")))
+                .isEqualTo(THOUSAND_TRY);
+    }
+
+    @Test
     void numberNotInDocumentIsDropped() {
         var ex = new StatementExtraction(true, THOUSAND_TRY, PERIODS, List.of(
                 item("operating_profit", "31,000,000", "60,000,000", 13)));
@@ -119,8 +131,10 @@ class StatementPipelineTest {
 
     @Test
     void unknownUnitIsOmittedNotInvented() {
+        // Belgede birim beyanı yok, çıkarımın birimi de tanınmıyor: birim yazılmaz.
+        var pagesWithoutDeclaration = Map.of(13, PAGE_13.replace("Sunum Para Birimi 1.000 TL", "Konsolide"));
         var ex = new StatementExtraction(true, new StatementExtraction.Unit("TRY", "lakh"), PERIODS, goodExtraction().items());
-        var verified = StatementVerifier.verify(ex, PAGES);
+        var verified = StatementVerifier.verify(ex, pagesWithoutDeclaration);
         assertThat(verified.unit()).isNull();
         var en = FinancialRuleEngine.evaluate(verified, Lang.EN);
         assertThat(en.findings().get(0).evidence()).startsWith("Operating profit fell from 60,000,000 to 30,000,000,");
