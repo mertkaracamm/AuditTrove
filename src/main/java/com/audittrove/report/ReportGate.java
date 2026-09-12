@@ -16,9 +16,10 @@ public final class ReportGate {
 
     private static final Pattern BIG_NUMBER = Pattern.compile("\\d[\\d.,]{3,}\\d");
     private static final Pattern WORD = Pattern.compile("\\p{L}{2,}");
-    // "594,995,138 thousand TL", "%80", "80 %", "12 ay", "31.12.2024" → sayı kısmı + kalan
+    // "594,995,138 thousand TL", "%80", "80 %", "EUR 84,000", "£1,250", "12 ay" → sayı kısmı + birim.
+    // Önde para birimi kodu/simgesi ya da yüzde, arkada birim metni olabilir; ikisi birden de gelir ("EUR 84,000 gross").
     private static final Pattern VALUE_WITH_UNIT = Pattern.compile(
-            "^\\s*(%\\s*)?([-(−]?\\d[\\d.,\\s]*\\d\\)?|\\d)\\s*(%|[\\p{L}][\\p{L}\\s./']*)?\\s*$");
+            "^\\s*(%|[\\p{Lu}]{2,4}|[$€£₺¥])?\\s*([-(−]?\\d[\\d.,\\s]*\\d\\)?|\\d)\\s*(%|[\\p{L}][\\p{L}\\s./']*)?\\s*$");
     private static final int MAX_TEXT_VALUE = 40;
 
     /** Ham tablo satırı görünümü: sayılar çok, kelimeler az ("Esas Faaliyet KARI 28.984.491 63.551.075"). */
@@ -60,9 +61,9 @@ public final class ReportGate {
         Matcher v = VALUE_WITH_UNIT.matcher(value);
         if (v.matches()) {
             String number = v.group(2).trim();
-            String lead = v.group(1) == null ? "" : "%";
+            String lead = v.group(1) == null ? "" : v.group(1).trim();
             String tail = v.group(3) == null ? "" : v.group(3).trim();
-            String embedded = !lead.isEmpty() ? "%" : tail;
+            String embedded = (lead + " " + tail).trim();
             if (!embedded.isEmpty() && unit.isEmpty()) unit = embedded;
             return new AuditResponse.KeyMetric(m.label(), number, unit, m.note());
         }

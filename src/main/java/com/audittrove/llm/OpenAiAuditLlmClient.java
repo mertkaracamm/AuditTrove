@@ -44,7 +44,9 @@ import java.util.stream.Collectors;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 public class OpenAiAuditLlmClient implements AuditLlmClient {
@@ -93,11 +95,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             the discrepancy in the evidence. Never copy OCR artifacts into titles, keyMetrics labels
             or values. If a figure or date cannot be read reliably, omit it or state that it could
             not be read reliably instead of guessing a value.
-            summary: 3 to 5 sentences. EVERY sentence must be verifiable against the document: it must
+            Keep the output compact: at most 4 findings (the most material ones), finding text of at most
+            2 sentences, evidence of 1 sentence, at most 3 recommendations. Brevity is part of quality.
+            summary: 3 to 4 sentences. EVERY sentence must be verifiable against the document: it must
             either quote a figure, percentage or proper name exactly as printed in the document, or
             restate one of your findings. Do not write general or unsupported statements (e.g. "cash
             flows are positive") unless the sentence carries the exact figure that proves it.
-            scoreRationale: one sentence explaining what drove the risk score, naming the main positive and negative signals.
+            scoreRationale: one short sentence on what drove the risk score.
             keyMetrics: 3 to 5 key facts from the document (amounts, dates, durations, rates) with label,
             value (the number or date ONLY, exactly as printed, no unit or currency inside it), unit (the
             scale and currency or symbol that belongs to the value, e.g. "thousand TL", "million EUR", "%",
@@ -234,6 +238,39 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private final ExecutorService sideTaskExecutor = Executors.newCachedThreadPool();
     // Ek gözlemler skora girmez; birincil bittikten sonra ikincillere bu kadar beklenir.
     private static final int CROSS_GRACE_SECONDS = 10;
+    // Aynı anda açık OpenAI çağrısı sayısı sınırlı: uzun belgede parçalar aynı anda başlarsa dakikalık
+    // token limiti aşılıyor ve 429 yağıyor. Sıra beklemek, işi düşürmekten iyidir.
+    private final Semaphore openAiSlots = new Semaphore(Integer.parseInt(System.getenv().getOrDefault("OPENAI_MAX_CONCURRENT", "4")));
+    // İkincil sağlayıcıların istek limitleri daha dar; sağlayıcı başına iki eşzamanlı çağrı.
+    private final Map<String, Semaphore> secondarySlots = new ConcurrentHashMap<>();
+
+    // İkincil model çağrısı: eşzamanlılık sınırı + geçici hatada (429/5xx/ağ) üç deneme. Oy kaybolursa
+    // çoğunluk eşiği kayar ve aynı belge farklı bulgu verir; o yüzden oy düşürmemek için uğraşılır.
+    private String secondaryCall(SecondaryBackend b, String system, String user) {
+        Semaphore slot = secondarySlots.computeIfAbsent(b.name(), k -> new Semaphore(2));
+        long backoffMs = 3000;
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                slot.acquire();
+                try {
+                    return b.completeJson(system, user);
+                } finally {
+                    slot.release();
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(ie);
+            } catch (HttpClientErrorException e) {
+                if (e.getStatusCode().value() != 429) throw e;
+                last = e;
+            } catch (HttpServerErrorException | ResourceAccessException e) {
+                last = e;
+            }
+            if (attempt < 3) { sleepQuietly(backoffMs); backoffMs *= 2; }
+        }
+        throw last;
+    }
     private volatile String schemaJsonCache;
 
     public OpenAiAuditLlmClient(ObjectMapper objectMapper,
@@ -322,28 +359,41 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
     }
 
-    // OpenAI cagrisini gecici hatalara karsi tekrar dener. Uzun belgede ~19 ardisik cagri
-    // yapildigindan, tek bir gecici hata (429 rate limit / 5xx / timeout) tum isi cokertmesin.
-    // Kalici hatalar (4xx, 429 disi) hemen firlatilir.
+    // OpenAI çağrısı: eşzamanlılık sınırı içinde, geçici hatada (429 / 5xx / ağ) beş deneme.
+    // Kalıcı hatalar (429 dışı 4xx) hemen fırlatılır.
     private JsonNode postToLlmWithRetry(Map<String, Object> body) {
-        int maxAttempts = 3;
-        long backoffMs = 2000;
+        int maxAttempts = 5;
+        long backoffMs = 3000;
         RuntimeException last = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
-                return restClient.post()
-                        .uri("/v1/chat/completions")
-                        .header("Authorization", "Bearer " + apiKey)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .body(body)
-                        .retrieve()
-                        .body(JsonNode.class);
+                openAiSlots.acquire();
+                try {
+                    return restClient.post()
+                            .uri("/v1/chat/completions")
+                            .header("Authorization", "Bearer " + apiKey)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(body)
+                            .retrieve()
+                            .body(JsonNode.class);
+                } finally {
+                    openAiSlots.release();
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(ie);
             } catch (HttpClientErrorException e) {
-                // Yalnizca 429 (rate limit) tekrar denenir; diger 4xx kalicidir
+                // Yalnızca 429 (dakikalık limit) tekrar denenir; sunucu süre söylediyse ona uyulur.
                 if (e.getStatusCode().value() == 429 && attempt < maxAttempts) {
                     last = e;
-                    sleepQuietly(backoffMs);
-                    backoffMs *= 2;
+                    long wait = backoffMs;
+                    String retryAfter = e.getResponseHeaders() == null ? null : e.getResponseHeaders().getFirst("Retry-After");
+                    if (retryAfter != null) {
+                        try { wait = Math.max(1000, (long) (Double.parseDouble(retryAfter.trim()) * 1000)); } catch (NumberFormatException ignored) { }
+                    }
+                    log.warn("OpenAI 429, {} ms sonra tekrar ({}/{})", wait, attempt, maxAttempts);
+                    sleepQuietly(Math.min(wait, 60_000));
+                    backoffMs = Math.min(backoffMs * 2, 30_000);
                     continue;
                 }
                 throw e;
@@ -629,9 +679,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // önem kodda sabit olduğu için aynı belge aynı bulgu setini ve aynı bandı verir.
     private static final int MAX_MODEL_FINDINGS = 2;
     private static final String RUBRIC_PROMPT = """
-            You are answering a fixed checklist about a document. Also classify the document kind.
-            For EVERY checklist item, regardless of kind, answer present=true only if the document itself
-            explicitly supports it; otherwise present=false. Never infer from general knowledge.
+            You are answering a fixed checklist about a document. Also state the document kind.
+            For EVERY checklist item answer present=true only if the document itself explicitly
+            supports it; otherwise present=false. Never infer from general knowledge.
             For present items give ONE short evidence sentence written in the OUTPUT LANGUAGE given below,
             paraphrasing the document (translate if the document is in another language; do not quote
             verbatim in a different language), keeping numbers, dates, currency and note references exactly
@@ -646,27 +696,35 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // dediyse bulgu olur — sınırdaki maddelerin koşudan koşuya değişmesini oylama söndürür.
     private List<AuditResponse.Risk> rubricFindings(String documentText, Lang lang, String documentType) {
         try {
+            List<String> chunks = splitIntoChunks(documentText);
+            if (chunks.isEmpty()) return List.of();
+            // Tür kullanıcının seçiminden; seçmediyse kısa bir sınıflandırma çağrısı (üç model oyu) karar verir.
+            // Sonra yalnızca o türün soruları sorulur: 45 madde yerine 6-8, cevap altı kat kısa, çağrı o kadar hızlı.
+            RubricItem.Kind kind = kindFromDocumentType(documentType);
+            if (kind == null) kind = classifyKind(chunks.get(0));
+            List<RubricItem> items = RubricItem.forKind(kind);
+            if (items.isEmpty()) return List.of();
             // Kontrol listesi her zaman İngilizce cevaplanır: var/yok kararı rapor diline bağlı olmasın.
             // Kanıt cümleleri sonda dil kapısı tarafından rapor diline çevrilir.
-            String system = RUBRIC_PROMPT + rubricQuestions() + languageInstruction(Lang.EN);
+            String system = RUBRIC_PROMPT + rubricQuestions(items) + languageInstruction(Lang.EN);
+            Map<String, Object> schema = rubricSchema(items);
             // Uzun belgede her parça ayrı oylanır ve hepsi aynı anda başlar; madde herhangi bir parçada
             // çoğunlukla "var" çıkarsa bulgu olur. Sürekliliğe ilişkin not 80. sayfadaysa da yakalanır.
-            List<String> chunks = splitIntoChunks(documentText);
             List<CompletableFuture<List<RubricResult>>> perChunk = new ArrayList<>();
             for (String chunk : chunks) {
-                perChunk.add(CompletableFuture.supplyAsync(() -> rubricVotes(system, chunk), fanOutExecutor));
+                perChunk.add(CompletableFuture.supplyAsync(() -> rubricVotes(system, schema, chunk), fanOutExecutor));
             }
             List<List<RubricResult>> votesByChunk = new ArrayList<>();
             for (CompletableFuture<List<RubricResult>> f : perChunk) votesByChunk.add(f.get());
-            if (votesByChunk.isEmpty() || votesByChunk.get(0).isEmpty()) return List.of();
+            if (votesByChunk.get(0).isEmpty()) return List.of();
 
-            RubricItem.Kind kind = kindFromDocumentType(documentType);
-            if (kind == null) kind = dominantKind(votesByChunk.get(0).get(0));
             List<AuditResponse.Risk> out = new ArrayList<>();
-            for (RubricItem item : RubricItem.forKind(kind)) {
+            for (RubricItem item : items) {
                 RubricAnswer best = null;
                 for (List<RubricResult> votes : votesByChunk) {
-                    int needed = votes.size() >= 3 ? 2 : 1; // üç oy varsa çoğunluk, yoksa birincil tek başına
+                    // Çoğunluk için iki oy gerekir; üç oy geldiyse 2/3, iki geldiyse ikisi de. Eşik gelen oy
+                    // sayısına göre bire düşmez, yoksa bir oyun kaybı bulgu setini değiştirirdi. Tek oy kaldıysa o karar verir.
+                    int needed = Math.min(2, votes.size());
                     int yes = 0;
                     RubricAnswer first = null;
                     for (RubricResult vote : votes) {
@@ -692,14 +750,14 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
     // Bir parça için oylar: ikinciller birincille aynı anda başlar, birincil listenin başında döner.
     // Birincil cevap veremezse parça oysuz kalır (boş liste).
-    private List<RubricResult> rubricVotes(String system, String chunk) {
-        List<CompletableFuture<RubricResult>> secondary = startRubricSecondaryVotes(system, chunk);
+    private List<RubricResult> rubricVotes(String system, Map<String, Object> schema, String chunk) {
+        List<CompletableFuture<RubricResult>> secondary = startRubricSecondaryVotes(system, schema, chunk);
         List<RubricResult> votes = new ArrayList<>();
         try {
             Map<String, Object> body = Map.of(
                     "model", model, "temperature", 0, "seed", 7,
                     "response_format", Map.of("type", "json_schema", "json_schema",
-                            Map.of("name", "checklist", "strict", true, "schema", rubricSchema())),
+                            Map.of("name", "checklist", "strict", true, "schema", schema)),
                     "messages", List.of(
                             Map.of("role", "system", "content", system),
                             Map.of("role", "user", "content", chunk)));
@@ -720,18 +778,18 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     }
 
     // İkincil modeller aynı kontrol listesini cevaplamaya hemen başlar; yapılandırılmamışsa boş liste döner.
-    private List<CompletableFuture<RubricResult>> startRubricSecondaryVotes(String system, String chunk) {
+    private List<CompletableFuture<RubricResult>> startRubricSecondaryVotes(String system, Map<String, Object> schema, String chunk) {
         if (!multiModelEnabled) return List.of();
         List<SecondaryBackend> active = secondaryBackends.stream().filter(SecondaryBackend::configured).toList();
         if (active.size() < 2) return List.of();
         String schemaText;
-        try { schemaText = objectMapper.writeValueAsString(rubricSchema()); } catch (Exception e) { return List.of(); }
+        try { schemaText = objectMapper.writeValueAsString(schema); } catch (Exception e) { return List.of(); }
         String sys = system + "\nRespond with ONLY one JSON object (no markdown fences, no commentary) that validates against this JSON Schema:\n" + schemaText;
         List<CompletableFuture<RubricResult>> futures = new ArrayList<>();
         for (SecondaryBackend b : active) {
             futures.add(CompletableFuture.supplyAsync(() -> {
                 try {
-                    String json = extractJsonObject(b.completeJson(sys, chunk));
+                    String json = extractJsonObject(secondaryCall(b, sys, chunk));
                     return json.isBlank() ? null : objectMapper.readValue(json, RubricResult.class);
                 } catch (Exception e) {
                     log.warn("Kontrol listesi oyu {} basarisiz: {}", b.name(), e.toString());
@@ -771,38 +829,87 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         };
     }
 
-    private static RubricItem.Kind dominantKind(RubricResult result) {
-        Map<RubricItem.Kind, Integer> hits = new java.util.EnumMap<>(RubricItem.Kind.class);
-        for (RubricAnswer a : result.answers()) {
-            RubricItem item = RubricItem.fromId(a.id());
-            if (item != null && a.present() && a.evidence() != null && !a.evidence().isBlank()) {
-                hits.merge(item.kind(), 1, Integer::sum);
+    // Sınıflandırma: tek kelimelik cevap, üç model aynı anda; çoğunluk, eşitlikte birincil.
+    // Cevap kısa olduğu için çağrı saniyelerle ölçülür; 45 soruyu boşa cevaplatmaktan çok ucuz.
+    private static final String CLASSIFY_PROMPT = """
+            Classify the document into exactly one kind. Kinds: financial (financial statements, annual or
+            interim report, audit report), rental (lease or tenancy agreement), employment (employment or
+            service contract), subscription (subscription, membership or recurring-service agreement),
+            insurance (insurance policy or certificate), vehicle (vehicle sale, purchase or loan agreement),
+            general (any other contract, offer, notice or document). Answer with the kind only.
+            """;
+
+    private RubricItem.Kind classifyKind(String chunk) {
+        List<String> kinds = Arrays.stream(RubricItem.Kind.values())
+                .filter(k -> k != RubricItem.Kind.OTHER)
+                .map(k -> k.name().toLowerCase(Locale.ROOT)).toList();
+        Map<String, Object> schema = Map.of(
+                "type", "object", "additionalProperties", false,
+                "required", List.of("kind"),
+                "properties", Map.of("kind", Map.of("type", "string", "enum", kinds)));
+        List<CompletableFuture<RubricItem.Kind>> secondary = new ArrayList<>();
+        if (multiModelEnabled) {
+            String schemaText;
+            try { schemaText = objectMapper.writeValueAsString(schema); } catch (Exception e) { schemaText = null; }
+            if (schemaText != null) {
+                String sys = CLASSIFY_PROMPT + "\nRespond with ONLY one JSON object that validates against this JSON Schema:\n" + schemaText;
+                for (SecondaryBackend b : secondaryBackends.stream().filter(SecondaryBackend::configured).toList()) {
+                    secondary.add(CompletableFuture.supplyAsync(() -> {
+                        try {
+                            JsonNode n = objectMapper.readTree(extractJsonObject(secondaryCall(b, sys, chunk)));
+                            return RubricItem.kindOf(n.path("kind").asText());
+                        } catch (Exception e) {
+                            return RubricItem.Kind.OTHER;
+                        }
+                    }, crossCheckExecutor));
+                }
             }
         }
-        RubricItem.Kind modelKind = RubricItem.kindOf(result.documentKind());
-        RubricItem.Kind best = RubricItem.Kind.GENERAL;
-        int bestHits = -1;
-        for (RubricItem.Kind k : RubricItem.Kind.values()) {
-            int h = hits.getOrDefault(k, 0);
-            // Eşitlikte modelin sınıflaması, o da yoksa sabit sıra kazanır.
-            if (h > bestHits || (h == bestHits && k == modelKind)) { best = k; bestHits = h; }
+        RubricItem.Kind primary = RubricItem.Kind.GENERAL;
+        try {
+            Map<String, Object> body = Map.of(
+                    "model", model, "temperature", 0, "seed", 7,
+                    "response_format", Map.of("type", "json_schema", "json_schema",
+                            Map.of("name", "document_kind", "strict", true, "schema", schema)),
+                    "messages", List.of(
+                            Map.of("role", "system", "content", CLASSIFY_PROMPT),
+                            Map.of("role", "user", "content", chunk)));
+            JsonNode response = postToLlmWithRetry(body);
+            JsonNode out = objectMapper.readTree(response.at("/choices/0/message/content").asText());
+            primary = RubricItem.kindOf(out.path("kind").asText());
+        } catch (Exception e) {
+            log.warn("Belge turu siniflandirilamadi, genel liste kullaniliyor: {}", e.toString());
         }
-        return bestHits <= 0 ? (modelKind == RubricItem.Kind.OTHER ? RubricItem.Kind.GENERAL : modelKind) : best;
+        if (primary == RubricItem.Kind.OTHER) primary = RubricItem.Kind.GENERAL;
+        Map<RubricItem.Kind, Integer> votes = new java.util.EnumMap<>(RubricItem.Kind.class);
+        votes.merge(primary, 1, Integer::sum);
+        try {
+            CompletableFuture.allOf(secondary.toArray(new CompletableFuture[0])).get(CROSS_GRACE_SECONDS, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("Tur oylari zamaninda gelmedi: {}", e.toString());
+        }
+        for (CompletableFuture<RubricItem.Kind> f : secondary) {
+            RubricItem.Kind k = f.getNow(RubricItem.Kind.OTHER);
+            if (k != RubricItem.Kind.OTHER) votes.merge(k, 1, Integer::sum);
+        }
+        RubricItem.Kind best = primary;
+        for (Map.Entry<RubricItem.Kind, Integer> e : votes.entrySet()) {
+            if (e.getValue() > votes.get(best)) best = e.getKey();
+        }
+        log.info("Belge turu: {} (oylar {})", best, votes);
+        return best;
     }
 
-    private String rubricQuestions() {
-        StringBuilder sb = new StringBuilder("\nDocument kinds: ");
-        sb.append(Arrays.stream(RubricItem.Kind.values()).map(k -> k.name().toLowerCase(Locale.ROOT)).collect(Collectors.joining(", ")));
-        sb.append("\nChecklist items (id — applies to kind — question):\n");
-        for (RubricItem r : RubricItem.values()) {
-            sb.append("- ").append(r.id()).append(" — ").append(r.kind().name().toLowerCase(Locale.ROOT))
-              .append(" — ").append(r.question()).append("\n");
+    private String rubricQuestions(List<RubricItem> items) {
+        StringBuilder sb = new StringBuilder("\nChecklist items (id — question):\n");
+        for (RubricItem r : items) {
+            sb.append("- ").append(r.id()).append(" — ").append(r.question()).append("\n");
         }
         return sb.toString();
     }
 
-    private Map<String, Object> rubricSchema() {
-        List<String> ids = Arrays.stream(RubricItem.values()).map(RubricItem::id).toList();
+    private Map<String, Object> rubricSchema(List<RubricItem> items) {
+        List<String> ids = items.stream().map(RubricItem::id).toList();
         List<String> kinds = Arrays.stream(RubricItem.Kind.values()).map(k -> k.name().toLowerCase(Locale.ROOT)).toList();
         Map<String, Object> answer = Map.of(
                 "type", "object", "additionalProperties", false,
@@ -1706,7 +1813,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             String system = SYSTEM_PROMPT + typeInstruction(documentType) + languageInstruction(lang)
                     + "\nRespond with ONLY one JSON object (no markdown fences, no commentary) that validates against this JSON Schema:\n"
                     + schemaJson();
-            String content = backend.completeJson(system, userPrompt(documentText, context));
+            String content = secondaryCall(backend, system, userPrompt(documentText, context));
             String json = extractJsonObject(content);
             if (json.isBlank()) {
                 log.warn("Capraz kontrol {}: bos veya JSON olmayan yanit", backend.name());

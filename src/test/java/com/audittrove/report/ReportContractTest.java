@@ -97,6 +97,17 @@ class ReportContractTest {
 
         var keepsGivenUnit = ReportGate.gateMetric(new AuditResponse.KeyMetric("Net income", "38.863.566", "bin TL", "x"));
         assertThat(keepsGivenUnit.unit()).isEqualTo("bin TL");
+
+        // Önde para birimi: "EUR 84,000", "£1,250", "EUR 84,000 gross"
+        var prefixed = ReportGate.gateMetric(new AuditResponse.KeyMetric("Base Salary", "EUR 84,000", "", ""));
+        assertThat(prefixed.value()).isEqualTo("84,000");
+        assertThat(prefixed.unit()).isEqualTo("EUR");
+        var symbol = ReportGate.gateMetric(new AuditResponse.KeyMetric("Rent", "£1,250", "", ""));
+        assertThat(symbol.value()).isEqualTo("1,250");
+        assertThat(symbol.unit()).isEqualTo("£");
+        var both = ReportGate.gateMetric(new AuditResponse.KeyMetric("Salary", "EUR 84,000 gross", "", ""));
+        assertThat(both.value()).isEqualTo("84,000");
+        assertThat(both.unit()).isEqualTo("EUR gross");
     }
 
     @Test
