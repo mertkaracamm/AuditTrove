@@ -582,21 +582,20 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // önem kodda sabit olduğu için aynı belge aynı bulgu setini ve aynı bandı verir.
     private static final int MAX_MODEL_FINDINGS = 2;
     private static final String RUBRIC_PROMPT = """
-            You are answering a fixed checklist about a document. First classify the document kind.
-            Then, for EVERY checklist item, answer present=true only if the document itself explicitly
-            supports it; otherwise present=false. Never infer from general knowledge.
+            You are answering a fixed checklist about a document. Also classify the document kind.
+            For EVERY checklist item, regardless of kind, answer present=true only if the document itself
+            explicitly supports it; otherwise present=false. Never infer from general knowledge.
             For present items give ONE short evidence sentence written in the OUTPUT LANGUAGE given below,
             paraphrasing the document (translate if the document is in another language; do not quote
             verbatim in a different language), keeping numbers, dates, currency and note references exactly
             as printed, and the number inside the nearest preceding [REPORT PAGE n] marker as page.
             For absent items evidence is "" and page 0.
-            Items that belong to a different document kind than the one you classified must be present=false.
             """;
 
     private record RubricAnswer(String id, boolean present, String evidence, int page) {}
     private record RubricResult(String documentKind, List<RubricAnswer> answers) {}
 
-    private List<AuditResponse.Risk> rubricFindings(String documentText, Lang lang) {
+    private List<AuditResponse.Risk> rubricFindings(String documentText, Lang lang, String documentType) {
         try {
             String chunk = splitIntoChunks(documentText).get(0);
             Map<String, Object> body = Map.of(
@@ -608,7 +607,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                             Map.of("role", "user", "content", chunk)));
             JsonNode response = postToLlmWithRetry(body);
             RubricResult result = objectMapper.readValue(response.at("/choices/0/message/content").asText(), RubricResult.class);
-            RubricItem.Kind kind = RubricItem.kindOf(result.documentKind());
+            // Tür seçimi kodda: kullanıcı tipi seçtiyse o; seçmediyse "var" cevabı en çok olan tür.
+            // Modelin kendi sınıflaması yalnızca eşitlikte ve yalnızca aday türler arasında kullanılır.
+            RubricItem.Kind kind = kindFromDocumentType(documentType);
+            if (kind == null) kind = dominantKind(result);
             List<AuditResponse.Risk> out = new ArrayList<>();
             for (RubricItem item : RubricItem.forKind(kind)) {
                 for (RubricAnswer a : result.answers()) {
@@ -627,6 +629,38 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             log.warn("Kontrol listesi calismadi, LLM bulgulariyla devam: {}", e.toString());
             return List.of();
         }
+    }
+
+    private static RubricItem.Kind kindFromDocumentType(String documentType) {
+        if (documentType == null) return null;
+        return switch (documentType.trim().toLowerCase(Locale.ROOT)) {
+            case "financial" -> RubricItem.Kind.FINANCIAL;
+            case "rental" -> RubricItem.Kind.RENTAL;
+            case "employment" -> RubricItem.Kind.EMPLOYMENT;
+            case "subscription" -> RubricItem.Kind.SUBSCRIPTION;
+            case "insurance" -> RubricItem.Kind.INSURANCE;
+            case "vehicle" -> RubricItem.Kind.VEHICLE;
+            default -> null; // "general" ya da bilinmeyen: belgenin kendisi söylesin
+        };
+    }
+
+    private static RubricItem.Kind dominantKind(RubricResult result) {
+        Map<RubricItem.Kind, Integer> hits = new java.util.EnumMap<>(RubricItem.Kind.class);
+        for (RubricAnswer a : result.answers()) {
+            RubricItem item = RubricItem.fromId(a.id());
+            if (item != null && a.present() && a.evidence() != null && !a.evidence().isBlank()) {
+                hits.merge(item.kind(), 1, Integer::sum);
+            }
+        }
+        RubricItem.Kind modelKind = RubricItem.kindOf(result.documentKind());
+        RubricItem.Kind best = RubricItem.Kind.GENERAL;
+        int bestHits = -1;
+        for (RubricItem.Kind k : RubricItem.Kind.values()) {
+            int h = hits.getOrDefault(k, 0);
+            // Eşitlikte modelin sınıflaması, o da yoksa sabit sıra kazanır.
+            if (h > bestHits || (h == bestHits && k == modelKind)) { best = k; bestHits = h; }
+        }
+        return bestHits <= 0 ? (modelKind == RubricItem.Kind.OTHER ? RubricItem.Kind.GENERAL : modelKind) : best;
     }
 
     private String rubricQuestions() {
@@ -753,7 +787,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         FinancialRuleEngine.Result rules = financialRules(documentText, pages, lang);
         // 0b) Kontrol listesi: belge tipine göre sabit sorular, sabit başlık ve önem. Skoru motor + rubrik
         //     belirler; LLM'in serbest bulguları "model" kaynaklı ek gözlem olarak kalır, en fazla iki tane.
-        List<AuditResponse.Risk> rubric = rubricFindings(documentText, lang);
+        List<AuditResponse.Risk> rubric = rubricFindings(documentText, lang, documentType);
         {
             List<AuditResponse.Risk> combined = new ArrayList<>(rules.findings());
             combined.addAll(rubric);
@@ -910,8 +944,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                             Map.of("name", "translation", "strict", true, "schema", schema)),
                     "messages", List.of(
                             Map.of("role", "system", "content", "Translate the value of every key into " + name
-                                    + ". Keep numbers, dates, currency, percentages and note references exactly as written."
-                                    + " Values already in " + name + " are returned unchanged. Return every key."),
+                                    + ", including quotations and clause texts from documents (translate them, do not keep the original language)."
+                                    + " Keep numbers, dates, currency, percentages and note references exactly as written."
+                                    + " Values already entirely in " + name + " are returned unchanged. Return every key."),
                             Map.of("role", "user", "content", objectMapper.writeValueAsString(input))));
             JsonNode response = postToLlmWithRetry(body);
             JsonNode out = objectMapper.readTree(response.at("/choices/0/message/content").asText());

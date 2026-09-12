@@ -108,7 +108,7 @@ function check(result, lang) {
   (result.advisorQuestions || []).forEach((t, i) => texts.push([`question[${i + 1}]`, t]));
   for (const [name, t] of texts) {
     const d = detectLang(t);
-    if (d && d !== lang) f('dil', `${name} ${d} görünüyor`);
+    if (d && d !== lang) f('dil', `${name} ${d} görünüyor: "${String(t).slice(0, 110)}"`);
     if (/\[REPORT PAGE|\((Page|Sayfa|Rapor Sayfa|Report Page)\s*\d/i.test(t || '')) f('işaretçi', `${name} içinde sayfa atfı`);
   }
   if (!result.summary || result.summary.length < 40) f('özet', 'boş ya da çok kısa');
