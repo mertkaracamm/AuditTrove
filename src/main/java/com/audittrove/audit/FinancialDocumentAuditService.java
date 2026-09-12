@@ -2,6 +2,9 @@ package com.audittrove.audit;
 
 import com.audittrove.api.AuditResponse;
 import com.audittrove.llm.AuditLlmClient;
+import com.audittrove.pdf.EvidenceLocator;
+import com.audittrove.pdf.PageText;
+import com.audittrove.pdf.PdfGeometry;
 import com.audittrove.pdf.PdfTextExtractor;
 import com.audittrove.rag.RegulationChunk;
 import com.audittrove.rag.RegulationRetriever;
@@ -11,9 +14,11 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class FinancialDocumentAuditService {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(FinancialDocumentAuditService.class);
     private final PdfTextExtractor pdfTextExtractor;
     private final RegulationRetriever regulationRetriever;
     private final AuditLlmClient llmClient;
@@ -62,10 +67,23 @@ public class FinancialDocumentAuditService {
             PdfTextExtractor.ExtractResult extracted = pdfTextExtractor.extractDetailed(content);
             // Belgeler kendi iceriklerine gore degerlendirilir; RAG korpusu aktif degil.
             List<RegulationChunk> context = List.of();
-            return llmClient.audit(extracted.text(), context, language, documentType,
+            AuditResponse response = llmClient.audit(extracted.text(), context, language, documentType,
                     extracted.truncated(), extracted.totalPages(), extracted.includedPages());
+            return anchorEvidence(response, content);
         } catch (IOException exception) {
             throw new InvalidDocumentException("PDF okunamadı", exception);
+        }
+    }
+
+    // Bulgu kanıtlarının sayfa üzerindeki yerleri: görüntüleyici bunları boyar. Konum bulunamazsa rapor
+    // aynen döner; bu adım hiçbir zaman incelemeyi düşürmez.
+    private AuditResponse anchorEvidence(AuditResponse response, byte[] content) {
+        try {
+            Map<Integer, PageText> pages = PdfGeometry.read(content);
+            return EvidenceLocator.annotate(response, pages);
+        } catch (Exception e) {
+            log.warn("Kanit konumlari cikarilamadi, rapor konumsuz donuyor: {}", e.toString());
+            return response;
         }
     }
 

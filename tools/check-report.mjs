@@ -135,6 +135,15 @@ function check(result, lang) {
     if (!r.evidence) f('bulgu', `${tag} kanıt yok`);
     if (!Array.isArray(r.pages) || r.pages.length === 0) f('sayfa', `${tag} sayfası yok`);
     else if (pageCount && r.pages.some((p) => p < 1 || p > pageCount)) f('sayfa', `${tag} sayfa ${r.pages} aralık dışı (1-${pageCount})`);
+    // konum: sayfası olan bulgunun çıpası olmalı; dikdörtgenler 0..1 içinde. Boyanamayan bulgu FAIL değil, sayılır.
+    const anchors = Array.isArray(r.anchors) ? r.anchors : [];
+    if (Array.isArray(r.pages) && r.pages.length && anchors.length === 0) f('konum', `${tag} sayfası var, çıpası yok`);
+    for (const a of anchors) {
+      if (!r.pages.includes(a.page)) f('konum', `${tag} çıpa sayfası ${a.page} bulgu sayfalarında yok`);
+      for (const q of a.rects || []) {
+        if ([q.x, q.y, q.w, q.h].some((v) => typeof v !== 'number' || v < 0 || v > 1) || q.x + q.w > 1.0001 || q.y + q.h > 1.0001 || q.w <= 0 || q.h <= 0) f('konum', `${tag} dikdörtgen sayfa dışı: ${JSON.stringify(q)}`);
+      }
+    }
     const big = (r.evidence || '').match(/\d[\d.,]{3,}\d/g) || [];
     const words = (r.evidence || '').match(/\p{L}{2,}/gu) || [];
     if (big.length >= 2 && words.length < 3 * big.length) f('kanıt', `${tag} ham tablo satırı gibi`);
@@ -178,7 +187,7 @@ const pad = (s, n) => String(s).padEnd(n);
   if (!files.length) { console.error(`PDF yok: ${DOCS}`); process.exit(2); }
   const token = await registerDevice();
   let totalFail = 0;
-  console.log(`${pad('belge', 44)} ${pad('dil', 4)} ${pad('koşu', 5)} ${pad('skor', 5)} ${pad('bulgu', 6)} ${pad('süre', 6)} durum`);
+  console.log(`${pad('belge', 44)} ${pad('dil', 4)} ${pad('koşu', 5)} ${pad('skor', 5)} ${pad('bulgu', 6)} ${pad('boyalı', 7)} ${pad('süre', 6)} durum`);
   for (const file of files) {
     const perLang = {};
     for (const lang of LANGS) {
@@ -194,7 +203,9 @@ const pad = (s, n) => String(s).padEnd(n);
         }
         runs.push(row);
         const r = row.result;
-        console.log(`${pad(basename(file).slice(0, 43), 44)} ${pad(lang, 4)} ${pad(k, 5)} ${pad(r ? r.riskScore : '-', 5)} ${pad(r ? (r.risks || []).length : '-', 6)} ${pad(row.ms ? Math.round(row.ms / 1000) + 's' : '-', 6)} ${row.fails.length ? 'FAIL' : 'PASS'}`);
+        const painted = r ? (r.risks || []).filter((x) => (x.anchors || []).some((a) => (a.rects || []).length)).length : 0;
+        const withPages = r ? (r.risks || []).filter((x) => (x.pages || []).length).length : 0;
+        console.log(`${pad(basename(file).slice(0, 43), 44)} ${pad(lang, 4)} ${pad(k, 5)} ${pad(r ? r.riskScore : '-', 5)} ${pad(r ? (r.risks || []).length : '-', 6)} ${pad(r ? `${painted}/${withPages}` : '-', 7)} ${pad(row.ms ? Math.round(row.ms / 1000) + 's' : '-', 6)} ${row.fails.length ? 'FAIL' : 'PASS'}`);
         for (const x of row.fails) console.log(`    - ${x}`);
         totalFail += row.fails.length;
       }
