@@ -492,6 +492,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
     private FinancialRuleEngine.Result financialRules(String documentText, Map<Integer, String> pages,
                                                       String language, String documentType) {
+        log.info("Gelir tablosu kapisi: documentType={} sayfa={}", documentType, pages.size());
         String type = documentType == null ? "financial" : documentType.trim().toLowerCase(Locale.ROOT);
         if (!type.equals("financial") || pages.isEmpty()) return FinancialRuleEngine.Result.empty();
         StatementExtraction extraction = extractStatement(documentText);
