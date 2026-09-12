@@ -5,6 +5,7 @@ import com.audittrove.financial.Lang;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -108,6 +109,46 @@ class ReportContractTest {
         assertThat(RubricItem.fromId("rent_auto_renewal")).isEqualTo(RubricItem.RENT_AUTO_RENEWAL);
         assertThat(RubricItem.kindOf("subscription")).isEqualTo(RubricItem.Kind.SUBSCRIPTION);
         assertThat(RubricItem.kindOf("nonsense")).isEqualTo(RubricItem.Kind.OTHER);
+    }
+
+    @Test
+    void summarySentencesNeedAnAnchorInTheDocumentOrAFinding() {
+        var pages = Map.of(
+                1, "Northwind Traders Inc. Consolidated Statement of Income. Revenue 594,995,138 2024 2023",
+                2, "Operating profit 28,984,491 63,551,075. Net income 38,863,566 70,826,085.");
+        var risks = List.of(new AuditResponse.Risk("Operating profit decline", "MEDIUM",
+                "Operating profit fell from 63,551,075 to 28,984,491, a 54.4% decrease.",
+                "Operating profit fell from 63,551,075 to 28,984,491, a 54.4% decrease.", List.of(2), AuditResponse.Risk.ENGINE));
+        String summary = "Northwind Traders reported revenue of 594,995,138 for 2024. "
+                + "Operating profit declined sharply compared with the prior year. "
+                + "The company generated positive net cash flows from operations and maintains a strong liquidity position. "
+                + "Management expects margins to recover next year.";
+        String grounded = SummaryGate.ground(summary, pages, risks);
+        assertThat(grounded).contains("revenue of 594,995,138");
+        assertThat(grounded).contains("Operating profit declined sharply");
+        assertThat(grounded).doesNotContain("positive net cash flows");
+        assertThat(grounded).doesNotContain("Management expects");
+
+        // Rapor dili belge dilinden farklıysa sayı ve özel ad yine dayanak olur.
+        String tr = "Northwind Traders 2024 yılında 594.995.138 gelir açıkladı. Şirket güçlü bir likidite pozisyonunu korumaktadır.";
+        assertThat(SummaryGate.ground(tr, pages, risks)).isEqualTo("Northwind Traders 2024 yılında 594.995.138 gelir açıkladı.");
+        assertThat(SummaryGate.ground("Görünüm olumludur.", pages, risks)).isEmpty();
+    }
+
+    @Test
+    void rationaleAndFallbackSummaryAreWrittenFromTheCountedFindings() {
+        var risks = List.of(
+                new AuditResponse.Risk("Material uncertainty about going concern", "HIGH", "f", "e", List.of(2), AuditResponse.Risk.RUBRIC),
+                new AuditResponse.Risk("Operating profit decline", "MEDIUM", "f", "e", List.of(2), AuditResponse.Risk.ENGINE),
+                new AuditResponse.Risk("Extra observation", "HIGH", "f", "e", List.of(1), AuditResponse.Risk.MODEL));
+        assertThat(SummaryGate.rationale(risks, Lang.TR))
+                .isEqualTo("Skoru yüksek seviyedeki en ağır bulgu belirledi; toplam 2 bulgu (1 yüksek, 1 orta) skora dahil edildi.");
+        assertThat(SummaryGate.rationale(risks, Lang.EN))
+                .isEqualTo("The score is set by the most severe finding (high); 2 findings (1 high, 1 medium) count toward it.");
+        assertThat(SummaryGate.fallbackSummary(risks, Lang.TR, 14))
+                .isEqualTo("14 sayfalık belgede 2 bulgu tespit edildi (1 yüksek, 1 orta). En önemlisi: Material uncertainty about going concern.");
+        assertThat(SummaryGate.rationale(List.of(), Lang.EN)).contains("No finding counts toward the score");
+        assertThat(SummaryGate.fallbackSummary(List.of(), Lang.TR, 3)).isEqualTo("3 sayfalık belgede dikkat gerektiren bir bulguya rastlanmadı.");
     }
 
     @Test

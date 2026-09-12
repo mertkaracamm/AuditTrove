@@ -211,6 +211,21 @@ const pad = (s, n) => String(s).padEnd(n);
         }
         const counts = ok.map((x) => (x.result.risks || []).filter((r) => r.source !== 'model').length);
         if (Math.max(...counts) - Math.min(...counts) > 1) { console.log(`    - tutarlılık: skora giren bulgu sayısı ${counts.join(' / ')} (1'den fazla oynadı)`); totalFail++; }
+        // Skor gerekçesi kodda yazılır: aynı bulgu dağılımı aynı cümleyi vermeli.
+        // Bulgu sayısı ±1 oynaması kabul edilen gürültü; gerekçe yalnızca aynı şiddet dağılımında karşılaştırılır.
+        const byHistogram = new Map();
+        for (const x of ok) {
+          const key = (x.result.risks || []).filter((r) => r.source !== 'model').map((r) => r.severity).sort().join(',');
+          if (!byHistogram.has(key)) byHistogram.set(key, new Set());
+          byHistogram.get(key).add(x.result.scoreRationale || '');
+        }
+        for (const [key, set] of byHistogram) {
+          if (set.size > 1) {
+            console.log(`    - tutarlılık: aynı bulgu dağılımında (${key}) skor gerekçesi farklı`);
+            [...set].forEach((e, i) => console.log(`        ${i + 1}: ${e}`));
+            totalFail++;
+          }
+        }
         const rubricTitles = ok.map((x) => (x.result.risks || []).filter((r) => r.source === 'rubric').map((r) => r.title).sort().join('|'));
         if (new Set(rubricTitles).size > 1) {
           console.log('    - tutarlılık: kontrol listesi bulguları koşular arasında farklı');

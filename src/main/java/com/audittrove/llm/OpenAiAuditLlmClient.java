@@ -12,6 +12,7 @@ import com.audittrove.report.LanguageCheck;
 import com.audittrove.report.PageRefs;
 import com.audittrove.report.ReportGate;
 import com.audittrove.report.RubricItem;
+import com.audittrove.report.SummaryGate;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -92,6 +93,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             the discrepancy in the evidence. Never copy OCR artifacts into titles, keyMetrics labels
             or values. If a figure or date cannot be read reliably, omit it or state that it could
             not be read reliably instead of guessing a value.
+            summary: 3 to 5 sentences. EVERY sentence must be verifiable against the document: it must
+            either quote a figure, percentage or proper name exactly as printed in the document, or
+            restate one of your findings. Do not write general or unsupported statements (e.g. "cash
+            flows are positive") unless the sentence carries the exact figure that proves it.
             scoreRationale: one sentence explaining what drove the risk score, naming the main positive and negative signals.
             keyMetrics: 3 to 5 key facts from the document (amounts, dates, durations, rates) with label,
             value (the number or date ONLY, exactly as printed, no unit or currency inside it), unit (the
@@ -221,9 +226,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OpenAiAuditLlmClient.class);
     private final List<SecondaryBackend> secondaryBackends;
     private final boolean multiModelEnabled;
-    private final ExecutorService crossCheckExecutor = Executors.newFixedThreadPool(4);
+    // Bir inceleme aynı anda dört ikincil çağrı açar (iki çapraz kontrol, iki kontrol listesi oyu);
+    // iki inceleme çakışsa da sıra beklemesin.
+    private final ExecutorService crossCheckExecutor = Executors.newFixedThreadPool(8);
     // Çıkarım ve kontrol listesi ana incelemeye paralel koşar; hiçbiri diğerinin sonucuna bağlı değil.
-    private final ExecutorService sideTaskExecutor = Executors.newFixedThreadPool(2);
+    private final ExecutorService sideTaskExecutor = Executors.newFixedThreadPool(4);
+    // Ek gözlemler skora girmez; birincil bittikten sonra ikincillere bu kadar beklenir.
+    private static final int CROSS_GRACE_SECONDS = 10;
     private volatile String schemaJsonCache;
 
     public OpenAiAuditLlmClient(ObjectMapper objectMapper,
@@ -625,6 +634,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             // Kontrol listesi her zaman İngilizce cevaplanır: var/yok kararı rapor diline bağlı olmasın.
             // Kanıt cümleleri sonda dil kapısı tarafından rapor diline çevrilir.
             String system = RUBRIC_PROMPT + rubricQuestions() + languageInstruction(Lang.EN);
+            // İkincil oylar birincil cevap beklenmeden başlar; üç model aynı anda okur.
+            List<CompletableFuture<RubricResult>> secondary = startRubricSecondaryVotes(system, chunk);
             Map<String, Object> body = Map.of(
                     "model", model, "temperature", 0, "seed", 7,
                     "response_format", Map.of("type", "json_schema", "json_schema",
@@ -636,7 +647,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             RubricResult primary = objectMapper.readValue(response.at("/choices/0/message/content").asText(), RubricResult.class);
             List<RubricResult> votes = new ArrayList<>();
             votes.add(primary);
-            votes.addAll(rubricSecondaryVotes(system, chunk));
+            votes.addAll(collectRubricSecondaryVotes(secondary));
 
             RubricItem.Kind kind = kindFromDocumentType(documentType);
             if (kind == null) kind = dominantKind(primary);
@@ -670,8 +681,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return null;
     }
 
-    // İkincil modeller aynı kontrol listesini paralel cevaplar; yapılandırılmamışsa boş döner.
-    private List<RubricResult> rubricSecondaryVotes(String system, String chunk) {
+    // İkincil modeller aynı kontrol listesini cevaplamaya hemen başlar; yapılandırılmamışsa boş liste döner.
+    private List<CompletableFuture<RubricResult>> startRubricSecondaryVotes(String system, String chunk) {
         if (!multiModelEnabled) return List.of();
         List<SecondaryBackend> active = secondaryBackends.stream().filter(SecondaryBackend::configured).toList();
         if (active.size() < 2) return List.of();
@@ -690,6 +701,12 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 }
             }, crossCheckExecutor));
         }
+        return futures;
+    }
+
+    // Oylar skora girdiği için beklenir; süre tavanını aşan oy o turda kullanılmaz.
+    private List<RubricResult> collectRubricSecondaryVotes(List<CompletableFuture<RubricResult>> futures) {
+        if (futures.isEmpty()) return List.of();
         try {
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(45, TimeUnit.SECONDS);
         } catch (Exception e) {
@@ -972,7 +989,14 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
         // Serbest metin alanlarına sızan sayfa işaretçileri de sökülür (sayfa bilgisi bulgularda taşınır).
         summary = PageRefs.strip(summary).text();
-        rationale = PageRefs.strip(rationale).text();
+        // Özetteki her cümle belgedeki bir sayıya/özel ada ya da bir bulguya dayanmalı; dayanaksız cümle çıkar.
+        // Cümle kalmazsa özet bulgulardan yazılır. Skor gerekçesi de skoru üreten bulgulardan kodda yazılır.
+        String groundedSummary = SummaryGate.ground(summary, pages, groundedRisks);
+        if (groundedSummary.length() < summary.length()) {
+            log.info("Ozet dayanak kapisi: {} karakter dayanaksiz cumle cikarildi", summary.length() - groundedSummary.length());
+        }
+        summary = groundedSummary.isBlank() ? SummaryGate.fallbackSummary(groundedRisks, lang, totalPages) : groundedSummary;
+        rationale = SummaryGate.rationale(groundedRisks, lang);
         List<String> recommendations = response.recommendations().stream().map(r -> PageRefs.strip(r).text()).toList();
         questions = questions == null ? null : questions.stream().map(q -> PageRefs.strip(q).text()).toList();
 
@@ -1000,15 +1024,20 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         fields.addAll(r.recommendations());
         fields.addAll(r.advisorQuestions());
         try {
+            // Yalnızca yanlış dilde görünen alanlar gönderilir; doğru dildekiler yerinde kalır.
+            // Çeviri çıktısı kısalır, çağrı hızlanır, doğru cümleye dokunulmaz.
             Map<String, Object> props = new LinkedHashMap<>();
             Map<String, Object> input = new LinkedHashMap<>();
             List<String> keys = new ArrayList<>();
             for (int i = 0; i < fields.size(); i++) {
+                Lang found = LanguageCheck.detect(fields.get(i));
+                if (found == null || found == lang) continue;
                 String key = "t" + i;
                 keys.add(key);
                 props.put(key, Map.of("type", "string"));
-                input.put(key, fields.get(i) == null ? "" : fields.get(i));
+                input.put(key, fields.get(i));
             }
+            if (keys.isEmpty()) return r;
             Map<String, Object> schema = Map.of("type", "object", "additionalProperties", false,
                     "required", keys, "properties", props);
             Map<String, Object> body = Map.of(
@@ -1023,10 +1052,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                             Map.of("role", "user", "content", objectMapper.writeValueAsString(input))));
             JsonNode response = postToLlmWithRetry(body);
             JsonNode out = objectMapper.readTree(response.at("/choices/0/message/content").asText());
-            List<String> translated = new ArrayList<>();
-            for (String key : keys) {
-                JsonNode v = out.get(key);
-                translated.add(v == null || v.isNull() ? fields.get(translated.size()) : v.asText());
+            List<String> translated = new ArrayList<>(fields);
+            for (int i = 0; i < fields.size(); i++) {
+                JsonNode v = out.get("t" + i);
+                if (v != null && !v.isNull() && !v.asText().isBlank()) translated.set(i, v.asText());
             }
             int i = 0;
             String summary = translated.get(i++);
@@ -1622,10 +1651,11 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
         AuditResponse primary = auditSingle(documentText, context, lang, documentType);
         try {
-            // Ikincillere sure tavani: bitmeyenler o turda atlanir, is asla surunmez.
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(45, TimeUnit.SECONDS);
+            // Çapraz kontrol yalnızca skora girmeyen ek gözlemleri süzer; birincil bittikten sonra
+            // ikincillere kısa bir pay verilir, geç kalan o turda atlanır. Rapor bu yüzden sürünmez.
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(CROSS_GRACE_SECONDS, TimeUnit.SECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
-            log.warn("Capraz kontrol sure tavanina takildi (45 sn) — geciken ikinciller bu turda atlaniyor");
+            log.warn("Capraz kontrol birincilden {} sn sonra hala bitmedi — geciken ikinciller bu turda atlaniyor", CROSS_GRACE_SECONDS);
         } catch (Exception e) {
             log.warn("Capraz kontrol beklenirken sorun: {}", e.toString());
         }
