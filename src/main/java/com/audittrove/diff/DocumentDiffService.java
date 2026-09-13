@@ -168,6 +168,7 @@ public class DocumentDiffService {
                 Her fark için: kısa başlık (en fazla 6 kelime, maddenin konusu), tek cümlelik açıklama (ne değişti; sayıları metinde yazıldığı gibi aktar)
                 ve etki: belgenin sunulduğu tarafın (kiracı, çalışan, müşteri, sigortalı, alıcı) gözünden FAVORABLE (lehte), UNFAVORABLE (aleyhte) ya da NEUTRAL.
                 Kurallar: yalnızca verilen eski/yeni metne dayan; metinde olmayan sayı ya da bilgi ekleme; hukuki ya da mali tavsiye verme, mevzuata uygunluk yorumu yapma.
+                Finansal tablo satırlarında kalem adından sonra gelen tek başına küçük sayı dipnot referansıdır (ör. "Hasılat 5 18 420,6"); tutar değildir, cümlede kullanma.
                 Emin değilsen NEUTRAL de. Çıktı tamamen Türkçe.
                 """;
         }
@@ -176,6 +177,7 @@ public class DocumentDiffService {
             For each change: a short title (max 6 words, the clause topic), a one-sentence explanation (what changed; quote numbers exactly as written)
             and impact from the perspective of the party the document is presented to (tenant, employee, customer, insured, buyer): FAVORABLE, UNFAVORABLE or NEUTRAL.
             Rules: rely only on the old/new text given; add no number or fact that is not in the text; no legal or financial advice, no compliance assessment.
+            In financial statement rows, a small standalone number right after the line item label is a footnote reference (e.g. "Revenue 5 18,420.6"), not an amount; never use it in the sentence.
             When unsure, say NEUTRAL. Output entirely in English.
             """;
     }
