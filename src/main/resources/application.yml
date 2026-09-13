@@ -4,7 +4,7 @@ spring:
   servlet:
     multipart:
       max-file-size: ${MAX_FILE_SIZE:15MB}
-      max-request-size: ${MAX_FILE_SIZE:15MB}
+      max-request-size: ${MAX_REQUEST_SIZE:32MB}
 server:
   port: ${PORT:8080}
   shutdown: graceful

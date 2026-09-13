@@ -63,6 +63,25 @@ public class AuditController {
         return diffService.diff(oldFile.getBytes(), newFile.getBytes(), language);
     }
 
+    /** Aynı iş, JSON gövdeyle: dosyalar base64. Mobil, çok dosyalı multipart gönderemediği durumda bunu kullanır. */
+    public record DiffJsonRequest(String oldFile, String newFile, String language) {}
+
+    @PostMapping(value = "/audit/diff", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @Operation(summary = "İki belge sürümü arasındaki farkları listeler (base64 JSON gövde)")
+    public DiffResponse diffJson(@RequestBody DiffJsonRequest request) {
+        if (request == null || request.oldFile() == null || request.newFile() == null) {
+            throw new com.audittrove.audit.InvalidDocumentException("İki PDF de gerekli");
+        }
+        byte[] oldPdf, newPdf;
+        try {
+            oldPdf = java.util.Base64.getDecoder().decode(request.oldFile());
+            newPdf = java.util.Base64.getDecoder().decode(request.newFile());
+        } catch (IllegalArgumentException e) {
+            throw new com.audittrove.audit.InvalidDocumentException("Dosya içeriği okunamadı");
+        }
+        return diffService.diff(oldPdf, newPdf, request.language());
+    }
+
     // --- Rapora soru sor: durumsuz. Cihaz soruyu, raporu ve sayfa metinlerini gönderir; sunucu hiçbir şey saklamaz ---
     @PostMapping(value = "/audit/chat", consumes = MediaType.APPLICATION_JSON_VALUE)
     @Operation(summary = "İncelenen belge hakkında soru cevaplar (durumsuz; rapor ve sayfa metni istekle gelir)")

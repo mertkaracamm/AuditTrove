@@ -8,9 +8,11 @@ import java.util.List;
 /**
  * İki belge sürümü arasındaki fark raporu. Farklar kodda bulunur ve sınıflanır; model yalnızca anlatır.
  * language: rapor dili. summary: kodda yazılan sayım cümlesi. unchangedUnits: eşleşip değişmeyen birim sayısı.
+ * unitsA/unitsB: iki belgedeki birim sayısı; matchedRatio: eşleşen birimlerin büyük belgeye oranı (0..1).
+ * Oran düşükse iki dosya aynı belgenin sürümleri değildir; arayüz uyarır.
  */
 public record DiffResponse(String language, int pageCountA, int pageCountB, String summary,
-                           List<Change> changes, int unchangedUnits) {
+                           List<Change> changes, int unchangedUnits, int unitsA, int unitsB, double matchedRatio) {
     @JsonCreator
     public DiffResponse {
         language = language == null ? "" : language;

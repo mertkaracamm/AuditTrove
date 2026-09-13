@@ -57,7 +57,9 @@ public class DocumentDiffService {
         int total = changes.size();
         if (changes.size() > MAX_CHANGES) changes = new ArrayList<>(changes.subList(0, MAX_CHANGES));
         changes = narrate(changes, lang);
-        return new DiffResponse(lang.code(), a.size(), b.size(), summary(changes, total, lang), changes, DiffEngine.unchangedCount(al));
+        double matched = (double) al.pairs().size() / Math.max(1, Math.max(ua.size(), ub.size()));
+        return new DiffResponse(lang.code(), a.size(), b.size(), summary(changes, total, lang), changes,
+                DiffEngine.unchangedCount(al), ua.size(), ub.size(), Math.round(matched * 1000) / 1000.0);
     }
 
     /** Her fark için başlık + tek cümle + etki; model tek çağrıda hepsini alır. Başarısızsa şablon. */
