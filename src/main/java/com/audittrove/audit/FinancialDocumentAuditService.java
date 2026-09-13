@@ -64,6 +64,16 @@ public class FinancialDocumentAuditService {
     }
 
     public AuditResponse audit(String filename, byte[] content, String language, String documentType) {
+        return audit(filename, content, language, documentType, () -> false);
+    }
+
+    /** cancelled: kullanıcı incelemeyi bıraktı mı. Bayrak model çağrılarına kadar iner, kalanlar yapılmaz. */
+    public AuditResponse audit(String filename, byte[] content, String language, String documentType,
+                               java.util.function.BooleanSupplier cancelled) {
+        return CancelScope.run(cancelled, () -> runAudit(filename, content, language, documentType));
+    }
+
+    private AuditResponse runAudit(String filename, byte[] content, String language, String documentType) {
         validate(filename, content);
         try {
             PdfTextExtractor.ExtractResult extracted = pdfTextExtractor.extractDetailed(content);

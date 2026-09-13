@@ -43,7 +43,7 @@ public class AuditJobService {
         job.setStatus(AuditJob.Status.PROCESSING);
         store.update(job);
         try {
-            AuditResponse response = auditService.audit(filename, content, language, documentType);
+            AuditResponse response = auditService.audit(filename, content, language, documentType, job::isCancelled);
             // Kullanici bu arada iptal ettiyse: sonuc/kota/push YOK.
             if (job.isCancelled()) {
                 job.setStatus(AuditJob.Status.FAILED);
@@ -59,7 +59,21 @@ public class AuditJobService {
                 quotaService.recordUsage(job.deviceId(), decision);
             }
             sendReadyPush(job);
+        } catch (AuditCancelledException cancel) {
+            // Kullanıcı vazgeçti: model çağrıları durduruldu, kota artmaz, push gitmez.
+            log.info("Inceleme iptal edildi, kalan model cagrilari yapilmadi (job {})", job.id());
+            job.setError("İnceleme iptal edildi");
+            job.setStatus(AuditJob.Status.FAILED);
+            store.update(job);
         } catch (Exception ex) {
+            // İptal, iç katmanlarda başka bir hataya dönüşmüş olabilir; kullanıcıya hata gibi gösterilmez.
+            if (job.isCancelled()) {
+                log.info("Inceleme iptal edildi (job {})", job.id());
+                job.setError("İnceleme iptal edildi");
+                job.setStatus(AuditJob.Status.FAILED);
+                store.update(job);
+                return;
+            }
             log.warn("Async inceleme basarisiz (job {}): {}", job.id(), ex.getMessage());
             job.setError(ex.getMessage());
             job.setStatus(AuditJob.Status.FAILED);

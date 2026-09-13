@@ -235,10 +235,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private final boolean multiModelEnabled;
     // Tüm LLM çağrıları ağ beklemesidir; sabit havuz iç içe bekleyen görevlerde kilitlenebilir.
     // Bu yüzden ikincil oylar, parçalar ve yan işler sınırsız havuzda koşar; eşzamanlılığı parça sayısı belirler.
-    private final ExecutorService crossCheckExecutor = Executors.newCachedThreadPool();
-    private final ExecutorService fanOutExecutor = Executors.newCachedThreadPool();
+    private final ExecutorService crossCheckExecutor = com.audittrove.audit.CancelScope.inherit(Executors.newCachedThreadPool());
+    private final ExecutorService fanOutExecutor = com.audittrove.audit.CancelScope.inherit(Executors.newCachedThreadPool());
     // Çıkarım ve kontrol listesi ana incelemeye paralel koşar; hiçbiri diğerinin sonucuna bağlı değil.
-    private final ExecutorService sideTaskExecutor = Executors.newCachedThreadPool();
+    private final ExecutorService sideTaskExecutor = com.audittrove.audit.CancelScope.inherit(Executors.newCachedThreadPool());
     // Ek gözlemler skora girmez; birincil bittikten sonra ikincillere bu kadar beklenir.
     private static final int CROSS_GRACE_SECONDS = 10;
     // Aynı anda açık OpenAI çağrısı sayısı sınırlı: uzun belgede parçalar aynı anda başlarsa dakikalık
@@ -253,6 +253,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // İkincil model çağrısı: eşzamanlılık sınırı + geçici hatada (429/5xx/ağ) üç deneme. Oy kaybolursa
     // çoğunluk eşiği kayar ve aynı belge farklı bulgu verir; o yüzden oy düşürmemek için uğraşılır.
     private String secondaryCall(SecondaryBackend b, String system, String user) {
+        com.audittrove.audit.CancelScope.check();
         Semaphore slot = secondarySlots.computeIfAbsent(b.name(), k -> new Semaphore(secondaryMaxConcurrent, true));
         long backoffMs = 3000;
         RuntimeException last = null;
@@ -273,7 +274,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             } catch (HttpServerErrorException | ResourceAccessException e) {
                 last = e;
             }
-            if (attempt < 3) { sleepQuietly(backoffMs); backoffMs *= 2; }
+            if (attempt < 3) { sleepQuietly(backoffMs); backoffMs *= 2; com.audittrove.audit.CancelScope.check(); }
         }
         throw last;
     }
@@ -385,6 +386,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // OpenAI çağrısı: eşzamanlılık sınırı içinde, geçici hatada (429 / 5xx / ağ) beş deneme.
     // Kalıcı hatalar (429 dışı 4xx) hemen fırlatılır.
     private JsonNode postToLlmWithRetry(Map<String, Object> body) {
+        // Kullanıcı vazgeçtiyse yeni çağrı yapılmaz; süren çağrı biter ama arkası gelmez.
+        com.audittrove.audit.CancelScope.check();
         int maxAttempts = 5;
         long backoffMs = 3000;
         RuntimeException last = null;
