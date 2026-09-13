@@ -27,6 +27,12 @@ class ReportContractTest {
         assertThat(PageRefs.strip("Finansman gideri arttı (Rapor Sayfası 1)").pages()).containsExactly(1);
         assertThat(PageRefs.strip("Covenant breached (Page 2 of 2)").pages()).containsExactly(2);
         assertThat(PageRefs.strip("Covenant breached (Pages 1 and 2)").text()).isEqualTo("Covenant breached");
+
+        // Çıplak kaynak işareti "[1]" cümlede kalmaz, sayfa olarak okunur.
+        var c = PageRefs.strip("İmzalanırken GBP 150,00 tutarında bir katılım ücreti ödenir ve bu ücret iade edilmez [1].");
+        assertThat(c.text()).isEqualTo("İmzalanırken GBP 150,00 tutarında bir katılım ücreti ödenir ve bu ücret iade edilmez.");
+        assertThat(c.pages()).containsExactly(1);
+        assertThat(PageRefs.strip("Late fee applies [2, 3]").pages()).containsExactly(2, 3);
     }
 
     @Test

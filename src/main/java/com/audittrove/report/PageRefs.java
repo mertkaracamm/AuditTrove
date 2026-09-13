@@ -24,6 +24,9 @@ public final class PageRefs {
             "\\(\\s*(?:Rapor\\s+)?(?:Report\\s+)?(?:Sayfa(?:sı|lar|ları|larda)?|Pages?|S\\.|pp?\\.)\\s*"
             + "([0-9]+(?:\\s*(?:[-–,]|ve|and|&)\\s*[0-9]+)*)(?:\\s*(?:of|/)\\s*[0-9]+)?\\s*\\)",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    // [1], [2, 3], [4-5]: çıplak köşeli parantez içi sayı, modelin kaynak işaretidir; cümlenin parçası değil.
+    private static final Pattern CITATION = Pattern.compile(
+            "\\[\\s*([0-9]{1,3}(?:\\s*(?:[-–,]|ve|and|&)\\s*[0-9]{1,3})*)\\s*\\]");
     private static final Pattern NUMBER = Pattern.compile("[0-9]+");
     private static final Pattern RANGE = Pattern.compile("([0-9]+)\\s*[-–]\\s*([0-9]+)");
     // Aralık makul olmalı; "3-40" gibi bir şey atıf değil gürültüdür, uçları alınır.
@@ -34,6 +37,7 @@ public final class PageRefs {
         SortedSet<Integer> pages = new TreeSet<>();
         String out = collect(BRACKET, text, pages);
         out = collect(PAREN, out, pages);
+        out = collect(CITATION, out, pages);
         out = tidy(out);
         return new Parsed(out, List.copyOf(pages));
     }
