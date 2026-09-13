@@ -1,5 +1,6 @@
 package com.audittrove.audit;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -17,13 +18,17 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class AuditJobStore {
     private static final long TTL_MS = 30 * 60 * 1000L;   // kayıt 30 dk sonra silinir
-    static final long STALE_MS = 5 * 60 * 1000L;          // bu kadar güncellenmeyen iş yarıda kalmış sayılır
+    static final long DEFAULT_STALE_MS = 3 * 60 * 1000L;  // bu kadar güncellenmeyen iş yarıda kalmış sayılır
+    private static final long HEARTBEAT_MS = 60 * 1000L;  // süren işin kaydına "yaşıyorum" damgası
 
     private final Map<String, AuditJob> jobs = new ConcurrentHashMap<>();
     private final AuditJobRecords records;
+    private final long staleMs;
 
-    public AuditJobStore(AuditJobRecords records) {
+    public AuditJobStore(AuditJobRecords records,
+                         @Value("${audittrove.jobs.stale-seconds:180}") long staleSeconds) {
         this.records = records;
+        this.staleMs = staleSeconds * 1000L;
     }
 
     public void put(AuditJob job) {
@@ -41,7 +46,7 @@ public class AuditJobStore {
     public AuditJob get(String id) {
         AuditJob job = jobs.get(id);
         if (job == null) job = records.find(id);   // başka kopyanın ya da önceki sürümün işi
-        if (job != null && isStale(job.status(), job.updatedAt(), System.currentTimeMillis())) {
+        if (job != null && isStale(job.status(), job.updatedAt(), System.currentTimeMillis(), staleMs)) {
             job.setStatus(AuditJob.Status.INTERRUPTED);
         }
         return job;
@@ -52,9 +57,20 @@ public class AuditJobStore {
     }
 
     /** Devam ediyor görünen ama uzun süredir kımıldamayan iş: sunucu yeniden başlamış demektir. */
-    static boolean isStale(AuditJob.Status status, long updatedAt, long now) {
+    static boolean isStale(AuditJob.Status status, long updatedAt, long now, long staleMs) {
         if (status != AuditJob.Status.PENDING && status != AuditJob.Status.PROCESSING) return false;
-        return now - updatedAt > STALE_MS;
+        return now - updatedAt > staleMs;
+    }
+
+    /** Süren işler kaydına dokunur; uzun bir inceleme yanlışlıkla yarıda kalmış sayılmasın. */
+    @Scheduled(fixedDelay = HEARTBEAT_MS)
+    public void heartbeat() {
+        if (!records.isEnabled()) return;
+        for (AuditJob job : jobs.values()) {
+            if (job.status() == AuditJob.Status.PENDING || job.status() == AuditJob.Status.PROCESSING) {
+                records.save(job);
+            }
+        }
     }
 
     @Scheduled(fixedDelay = 5 * 60 * 1000L)

@@ -32,6 +32,8 @@ audittrove:
     # Async islerin durumu ve raporu burada tutulur (belge/sayfa metni YAZILMAZ, 30 dk sonra silinir).
     # Verilmezse kullanim sayaclarinin veritabani kullanilir; o da yoksa isler yalniz bellekte durur.
     database-url: ${JOB_DATABASE_URL:${USAGE_DATABASE_URL:}}
+    # Bu kadar saniyedir guncellenmeyen is "yarida kaldi" sayilir. Suren isler dakikada bir damgalanir.
+    stale-seconds: ${JOB_STALE_SECONDS:180}
   security:
     # Bos birakilirsa mobil auth filtresi pasif kalir (mevcut davranis).
     # Deploy oncesi guclu bir rastgele deger verilmeli: MOBILE_TOKEN_SECRET
