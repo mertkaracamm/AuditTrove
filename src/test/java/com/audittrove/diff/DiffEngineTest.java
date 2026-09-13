@@ -106,6 +106,34 @@ class DiffEngineTest {
     }
 
     @Test
+    void financialTableRowsAreSeparateUnitsAndKeepTheirLabelAsTitle() {
+        // Tablo satırı: rakamla (ya da parantezli tutarla) biter, sayı çok kelime az. Alttaki paragrafla birleşmez.
+        assertThat(DiffEngine.looksLikeTableRow("Hasılat 5 18 420,6 15 980,2")).isTrue();
+        assertThat(DiffEngine.looksLikeTableRow("Genel yönetim giderleri 7 (1 290,4) (905,7)")).isTrue();
+        assertThat(DiffEngine.looksLikeTableRow("Dönem kârı 88,1 1 520,9")).isTrue();
+        // Satır sonunda kalan tek sayı cümlenin devamıdır.
+        assertThat(DiffEngine.looksLikeTableRow("kredilerin kur farkı giderleri ve artan politika faizi kaynaklıdır. Toplam finansal borç 31")).isFalse();
+        assertThat(DiffEngine.looksLikeTableRow("Aralık 2025 itibarıyla 9 870,0 milyon TL'dir (2024: 7 120,5 milyon TL).")).isFalse();
+
+        var oldPage = Map.of(1, new PageText(1, List.of(
+                line("Hasılat 5 18 420,6 15 980,2", 0),
+                line("Genel yönetim giderleri 7 (1 290,4) (905,7)", 1),
+                line("Dönem kârı 702,4 1 520,9", 2),
+                line("Dipnot 9 - Finansman giderleri. Toplam finansal borç 9 870,0 milyon TL'dir.", 3))));
+        var newPage = Map.of(1, new PageText(1, List.of(
+                line("Hasılat 5 21 305,1 15 980,2", 0),
+                line("Genel yönetim giderleri 7 (1 512,8) (905,7)", 1),
+                line("Dönem kârı 88,1 1 520,9", 2),
+                line("Dipnot 9 - Finansman giderleri. Toplam finansal borç 12 430,0 milyon TL'dir.", 3))));
+        var changes = DiffEngine.changes(DiffEngine.align(DiffEngine.units(oldPage), DiffEngine.units(newPage)));
+        // Dört satırın üçü değişti; hiçbiri "eklendi/çıkarıldı" olmadı (satırlar birbirine karışmadı).
+        assertThat(changes).hasSize(4);
+        for (var c : changes) assertThat(c.kind()).isEqualTo(DiffResponse.Change.NUMBER);
+        assertThat(DocumentDiffService.fallbackTitle(changes.get(0), Lang.TR)).isEqualTo("Hasılat");
+        assertThat(DocumentDiffService.fallbackTitle(changes.get(3), Lang.TR)).isEqualTo("Dipnot 9");
+    }
+
+    @Test
     void narrativeNumbersMustComeFromTheClauseText() {
         var c = new DiffResponse.Change(DiffResponse.Change.NUMBER, null, "", "",
                 "Aylık kira bedeli 42.500 TL", "Aylık kira bedeli 47.000 TL", List.of("42.500"), List.of("47.000"),

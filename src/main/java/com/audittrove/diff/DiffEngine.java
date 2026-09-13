@@ -3,7 +3,6 @@ package com.audittrove.diff;
 import com.audittrove.api.AuditResponse;
 import com.audittrove.financial.NumberText;
 import com.audittrove.pdf.PageText;
-import com.audittrove.report.ReportGate;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -41,7 +40,7 @@ public final class DiffEngine {
 
     // "Madde 5", "MADDE 5.2 -", "Article 3", "Section 4.1", "5.", "5.2)", "(a)", "a)"
     private static final Pattern HEADER = Pattern.compile(
-            "^\\s*(?:(madde|article|section|clause|bölüm|kısım)\\s*(\\d+(?:[.,]\\d+)*)|(\\d+(?:\\.\\d+)*)[.)]\\s+\\p{L}|\\(?([a-zçğıöşü])\\)\\s+\\p{L})",
+            "^\\s*(?:(madde|article|section|clause|bölüm|kısım|dipnot|not|note|footnote)\\s*(\\d+(?:[.,]\\d+)*)|(\\d+(?:\\.\\d+)*)[.)]\\s+\\p{L}|\\(?([a-zçğıöşü])\\)\\s+\\p{L})",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     private static final Pattern WORD = Pattern.compile("\\p{L}{3,}");
     private static final Pattern NUMBER = Pattern.compile("\\d(?:[\\d.,]|[ \\u00a0](?=\\d{3}(?!\\d)))*\\d|\\d");
@@ -68,8 +67,8 @@ public final class DiffEngine {
                 PageText.Line prev = current.isEmpty() ? null : current.get(current.size() - 1);
                 boolean startsNew = prev == null
                         || HEADER.matcher(text).find()
-                        || ReportGate.looksLikeRawRow(text)
-                        || ReportGate.looksLikeRawRow(prev.text())
+                        || looksLikeTableRow(text)
+                        || looksLikeTableRow(prev.text())
                         || gapBefore(prev, line) > PARAGRAPH_GAP
                         || endsParagraph(prev, fullWidth, text);
                 if (startsNew && !current.isEmpty()) {
@@ -94,6 +93,26 @@ public final class DiffEngine {
         // Sayfa numarası, tek harf, boş başlık gibi kırıntılar birim değildir.
         if (text.length() < 4 || text.matches("[\\d\\s.\\-–/]+")) return;
         out.add(new Unit(page, text, List.copyOf(lines), clauseKey(text)));
+    }
+
+    /**
+     * Tablo satırı: rakamla biter, en az iki sayı taşır ve kelimeden çok sayı vardır ("Dönem kârı 88,1 1 520,9").
+     * Satır sonunda kalan tek bir sayı ("…toplam finansal borç 31") cümlenin devamıdır, satır değildir.
+     */
+    static boolean looksLikeTableRow(String text) {
+        if (text == null || text.isBlank()) return false;
+        String trimmed = text.strip();
+        // Eksi tutarlar parantezle yazılır ("(905,7)"), yüzdeler işaretle biter; bunlar da rakamla biter sayılır.
+        while (!trimmed.isEmpty() && ")]%\u201d\"'".indexOf(trimmed.charAt(trimmed.length() - 1)) >= 0) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        if (trimmed.isEmpty() || !Character.isDigit(trimmed.charAt(trimmed.length() - 1))) return false;
+        int numbers = 0, words = 0;
+        Matcher n = NUMBER.matcher(trimmed);
+        while (n.find()) numbers++;
+        Matcher w = WORD.matcher(trimmed);
+        while (w.find()) words++;
+        return numbers >= 2 && words < 3 * numbers;
     }
 
     // Paragrafın son satırı kısa kalır; altındaki satır büyük harfle başlıyorsa boşluk olmasa da yeni paragraftır.

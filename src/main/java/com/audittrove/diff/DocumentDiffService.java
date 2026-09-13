@@ -114,7 +114,15 @@ public class DocumentDiffService {
             String k = key.startsWith("n ") ? key.substring(2) : Character.toUpperCase(key.charAt(0)) + key.substring(1);
             return k;
         }
+        // Tablo satırında başlık kalemin adıdır; rakamlar başlığa girmez ("Hasılat 5 21 305,1 15 980,2" → "Hasılat").
         int cut = base.length();
+        java.util.regex.Matcher firstNumber = java.util.regex.Pattern.compile("\\d").matcher(base);
+        // Rakamdan önceki kısım iki kelimeden azsa ("Dipnot 9 - ...") başlık cümlenin ilk parçası olur.
+        if (firstNumber.find() && firstNumber.start() > 2
+                && (DiffEngine.looksLikeTableRow(base)
+                    || base.substring(0, firstNumber.start()).strip().split("\\s+").length >= 2)) {
+            cut = firstNumber.start();
+        }
         for (char stop : new char[]{'.', ':', ';'}) { int i = base.indexOf(stop); if (i > 8 && i < cut) cut = i; }
         String head = base.substring(0, Math.min(cut, 60)).strip();
         return head.isEmpty() ? (lang.isTurkish() ? "Değişiklik" : "Change") : head;

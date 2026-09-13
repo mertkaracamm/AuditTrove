@@ -77,6 +77,9 @@ class ReportContractTest {
         assertThat(ReportGate.looksLikeRawRow("Esas Faaliyet KARI (ZARARI) 28.984.491 63.551.075; Net Dönem Karı veya Zararı 38.863.566 70.826.085 .")).isTrue();
         assertThat(ReportGate.looksLikeRawRow("Operating profit fell from 63,551,075 thousand TL to 28,984,491 thousand TL, a 54.4% decrease.")).isFalse();
         assertThat(ReportGate.looksLikeRawRow("Sales to related parties constitute 80% of total sales (2023: 75%).")).isFalse();
+        // Boşlukla gruplanmış tablo satırı da ham satırdır; yıl geçen cümle değildir.
+        assertThat(ReportGate.looksLikeRawRow("Hasılat 5 18 420,6 15 980,2")).isTrue();
+        assertThat(ReportGate.looksLikeRawRow("Toplam finansal borç 31 Aralık 2025 itibarıyla 9 870,0 milyon TL'dir (2024: 7 120,5 milyon TL).")).isFalse();
 
         var raw = new AuditResponse.Risk("Decline", "MEDIUM", "Operating profit and net income fell sharply in 2024.",
                 "Esas Faaliyet KARI (ZARARI) 28.984.491 63.551.075; Net Dönem Karı 38.863.566 70.826.085", List.of(13));
