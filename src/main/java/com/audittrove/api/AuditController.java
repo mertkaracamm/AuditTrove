@@ -159,6 +159,7 @@ public class AuditController {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         }
         job.setCancelled(true);
+        jobStore.update(job);
         return ResponseEntity.ok().build();
     }
 }

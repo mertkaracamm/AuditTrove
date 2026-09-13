@@ -1,5 +1,6 @@
 package com.audittrove.security;
 
+import com.audittrove.db.PostgresUrl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -40,25 +41,16 @@ public class DeviceUsageStore {
     private final String password;
 
     public DeviceUsageStore(@Value("${audittrove.security.usage-database-url:}") String rawUrl) {
-        if (rawUrl == null || rawUrl.isBlank()) {
+        PostgresUrl parsed = PostgresUrl.parse(rawUrl);
+        if (parsed == null) {
             this.url = null;
             this.username = null;
             this.password = null;
             return;
         }
-        // railway url'i jdbc formatina cevir
-        if (rawUrl.startsWith("postgresql://") || rawUrl.startsWith("postgres://")) {
-            java.net.URI uri = java.net.URI.create(rawUrl.replaceFirst("^postgres(ql)?", "postgresql"));
-            String[] userInfo = uri.getUserInfo() != null ? uri.getUserInfo().split(":", 2) : new String[0];
-            this.username = userInfo.length > 0 ? userInfo[0] : null;
-            this.password = userInfo.length > 1 ? userInfo[1] : null;
-            int port = uri.getPort() > 0 ? uri.getPort() : 5432;
-            this.url = "jdbc:postgresql://" + uri.getHost() + ":" + port + uri.getPath();
-        } else {
-            this.url = rawUrl;
-            this.username = null;
-            this.password = null;
-        }
+        this.url = parsed.url();
+        this.username = parsed.username();
+        this.password = parsed.password();
         initSchema();
     }
 

@@ -1,6 +1,9 @@
 spring:
   application:
     name: audittrove
+  lifecycle:
+    # Kapanma penceresi: suren incelemeler bitene kadar beklenir (bkz. AUDIT_SHUTDOWN_WAIT_SECONDS).
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:130s}
   servlet:
     multipart:
       max-file-size: ${MAX_FILE_SIZE:15MB}
@@ -25,6 +28,10 @@ springdoc:
     path: /swagger-ui.html
 audittrove:
   max-pdf-bytes: ${MAX_PDF_BYTES:15728640}
+  jobs:
+    # Async islerin durumu ve raporu burada tutulur (belge/sayfa metni YAZILMAZ, 30 dk sonra silinir).
+    # Verilmezse kullanim sayaclarinin veritabani kullanilir; o da yoksa isler yalniz bellekte durur.
+    database-url: ${JOB_DATABASE_URL:${USAGE_DATABASE_URL:}}
   security:
     # Bos birakilirsa mobil auth filtresi pasif kalir (mevcut davranis).
     # Deploy oncesi guclu bir rastgele deger verilmeli: MOBILE_TOKEN_SECRET

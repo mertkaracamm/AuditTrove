@@ -41,16 +41,20 @@ public class AuditJobService {
                         String language, String documentType,
                         QuotaService.Decision decision) {
         job.setStatus(AuditJob.Status.PROCESSING);
+        store.update(job);
         try {
             AuditResponse response = auditService.audit(filename, content, language, documentType);
             // Kullanici bu arada iptal ettiyse: sonuc/kota/push YOK.
             if (job.isCancelled()) {
                 job.setStatus(AuditJob.Status.FAILED);
                 job.setError("İnceleme iptal edildi");
+                store.update(job);
                 return;
             }
             job.setResult(response);
             job.setStatus(AuditJob.Status.DONE);
+            // Kayıt önce yazılır: bu kopya hemen kapansa bile telefon sonucu yeni kopyadan alır.
+            store.update(job);
             if (job.deviceId() != null && decision != null) {
                 quotaService.recordUsage(job.deviceId(), decision);
             }
@@ -59,6 +63,7 @@ public class AuditJobService {
             log.warn("Async inceleme basarisiz (job {}): {}", job.id(), ex.getMessage());
             job.setError(ex.getMessage());
             job.setStatus(AuditJob.Status.FAILED);
+            store.update(job);
         }
     }
 

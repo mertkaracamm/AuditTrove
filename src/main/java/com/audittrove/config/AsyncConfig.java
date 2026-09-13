@@ -21,12 +21,17 @@ public class AsyncConfig {
     // Çekirdek ve tavan aynı: ThreadPoolTaskExecutor kuyruk dolmadan çekirdeğin üstüne çıkmaz,
     // tavan ayrı verilirse fiilen çekirdek kadar iş koşar. Kuyruk geniş: yığılma reddedilmez, bekler.
     @Bean(name = "auditJobExecutor")
-    public Executor auditJobExecutor(@Value("${AUDIT_JOB_CONCURRENCY:8}") int concurrency) {
+    public Executor auditJobExecutor(@Value("${AUDIT_JOB_CONCURRENCY:8}") int concurrency,
+                                     @Value("${AUDIT_SHUTDOWN_WAIT_SECONDS:120}") int shutdownWaitSeconds) {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(concurrency);
         executor.setMaxPoolSize(concurrency);
         executor.setQueueCapacity(500);
         executor.setThreadNamePrefix("audit-job-");
+        // Kapanma sırasında süren inceleme yarıda kesilmez: yeni iş alınmaz, eldekinin bitmesi beklenir.
+        // Railway yeni sürümü ayağa kaldırırken eski kopya bu sürede işini bitirip sonucu kaydeder.
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(shutdownWaitSeconds);
         executor.initialize();
         return executor;
     }
