@@ -114,6 +114,14 @@ class ReportContractTest {
         assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Ruhsat veriliş ayı", "mar", "", ""))).isNull();
         assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Ruhsat tarihi", "29.01.2021", "", "")).value()).isEqualTo("29.01.2021");
         assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Süre", "12", "ay", "")).value()).isEqualTo("12");
+
+        // Kimlik ve numaralar gösterge değil; birimli tutarlar ve sayılan şeyler kalır.
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Müteahhit vergi numarası", "18.902.730.010", "", ""))).isNull();
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Sözleşme No", "4936", "", ""))).isNull();
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Policy number", "TR-2024/0091", "", ""))).isNull();
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Toplam maliyet", "219.032", "TL", "")).value()).isEqualTo("219.032");
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Bağımsız bölüm sayısı", "2", "", "")).value()).isEqualTo("2");
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Number of employees", "120", "", "")).value()).isEqualTo("120");
     }
 
     @Test

@@ -54,8 +54,13 @@ public final class ReportGate {
      * Ne sayı ne kısa metin olan değer (uzun cümle) düşer (null).
      */
     // Tarihin parçası gösterge olamaz: "Ruhsat veriliş günü: 19", "ayı: mar" gibi kartlar düşer; tarih tek kartta kalır.
-    private static final Pattern DATE_PART_LABEL = Pattern.compile("(?i)\\b(gün|günü|ay|ayı|yıl|yılı|day|month|year)\\b");
+    private static final Pattern DATE_PART_LABEL = Pattern.compile("(?iU)\\b(gün|günü|ay|ayı|yıl|yılı|day|month|year)\\b");
     private static final Pattern MONTH_ABBR = Pattern.compile("(?i)^(oca|şub|sub|mar|nis|may|haz|tem|ağu|agu|eyl|eki|kas|ara|jan|feb|apr|jun|jul|aug|sep|oct|nov|dec)[a-zçğıöşü]*\\.?$");
+
+    // Kimlik ve numara gösterge değildir: "Vergi numarası: 18.902.730.010", "Sözleşme No: 4936" gibi kartlar düşer.
+    private static final Pattern IDENTIFIER_LABEL = Pattern.compile(
+            "(?iU)\\b(numarası|numara|no|nr|sicil|kimlik|tckn|tc|vkn|iban|barkod|kodu|kod|id|number|code|ref|referans)\\b");
+    private static final Pattern COUNT_LABEL = Pattern.compile("(?iU)\\b(number of|count|sayısı|adedi)\\b");
 
     public static AuditResponse.KeyMetric gateMetric(AuditResponse.KeyMetric m) {
         if (m == null || m.value() == null) return null;
@@ -65,6 +70,8 @@ public final class ReportGate {
         String label = m.label() == null ? "" : m.label();
         if (MONTH_ABBR.matcher(value).matches()) return null;
         if (unit.isEmpty() && value.matches("\\d{1,2}") && DATE_PART_LABEL.matcher(label).find()) return null;
+        // "Number of employees: 120" bir sayımdır, kimlik değil; o yüzden ayrı tutulur.
+        if (unit.isEmpty() && IDENTIFIER_LABEL.matcher(label).find() && !COUNT_LABEL.matcher(label).find()) return null;
         Matcher v = VALUE_WITH_UNIT.matcher(value);
         if (v.matches()) {
             String number = v.group(2).trim();
