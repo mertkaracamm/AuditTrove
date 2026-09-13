@@ -50,11 +50,19 @@ public final class NumberText {
         return raw == null ? "" : raw.replaceAll("[^0-9]", "");
     }
 
+    // Bazı PDF'ler ayraç etrafına boşluk sızdırır ("68 .226 .515", "1. 245,6"); bunlar tek sayıdır.
+    private static final Pattern STRAY_SPACE = Pattern.compile("(?<=\\d)[ \\u00a0]+(?=[.,]\\d)|(?<=\\d[.,])[ \\u00a0]+(?=\\d{3}(?!\\d))");
+
+    /** Ayraç etrafındaki kaçak boşluklar kaldırılmış metin; sayı tanıma öncesi uygulanır. */
+    public static String joinSplitNumbers(String text) {
+        return text == null ? null : STRAY_SPACE.matcher(text).replaceAll("");
+    }
+
     /** Sayfa metnindeki tüm sayıların rakam anahtarları; aynı sayı hangi biçimde yazılsa da bulunur. */
     public static Set<String> digitKeys(String text) {
         Set<String> keys = new HashSet<>();
         if (text == null) return keys;
-        Matcher m = TOKEN.matcher(text);
+        Matcher m = TOKEN.matcher(joinSplitNumbers(text));
         while (m.find()) {
             keys.add(digits(m.group()));
         }
@@ -64,7 +72,7 @@ public final class NumberText {
     /** Rakam anahtarı satırda hangi konumda geçiyor; yoksa -1. Sütun sırası kontrolü için. */
     public static int positionOf(String digitKey, String line) {
         if (digitKey == null || digitKey.isEmpty() || line == null) return -1;
-        Matcher m = TOKEN.matcher(line);
+        Matcher m = TOKEN.matcher(joinSplitNumbers(line));
         while (m.find()) {
             if (digitKey.equals(digits(m.group()))) return m.start();
         }

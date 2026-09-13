@@ -162,6 +162,9 @@ class StatementPipelineTest {
         assertThat(NumberText.digits("28.984.491")).isEqualTo(NumberText.digits("28,984,491"));
         assertThat(NumberText.parse("18 420,6")).isEqualTo(18420.6);
         assertThat(NumberText.digitKeys("Hasılat 5 18 420,6 15 980,2")).contains("184206", "159802");
+        // Ayraç etrafına sızan boşluklar sayıyı bölmez.
+        assertThat(NumberText.digitKeys("Ticari Alacaklar 68 .226 .515 65.821 .936")).contains("68226515", "65821936");
+        assertThat(NumberText.digitKeys("Finansman giderleri (1. 980,3)")).contains("19803");
     }
 
     @Test

@@ -6,7 +6,7 @@
 //                --docs ./test-docs --langs tr,en --runs 2
 // Node 18+ (fetch/FormData/Blob yerleşik). Belgeler saklanmaz; script yalnızca yükler ve JSON'u okur.
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -16,6 +16,73 @@ const DOCS = args.docs || './test-docs';
 const LANGS = (args.langs || 'tr,en').split(',');
 const RUNS = Number(args.runs || 2);
 const DOC_TYPE = args.type || 'general';
+// --dump <klasör>: her koşunun ham JSON'u yazılır (hata ayıklama için).
+const DUMP = args.dump || null;
+
+// Konum doğrulaması: pdf.js ile sayfadaki metin satırlarının yerleri bağımsız okunur; her çıpa kanıttaki
+// sayının (yoksa kelimelerin) gerçekten geçtiği satıra oturmalı. PDFBox'tan bağımsız ikinci göz.
+let pdfjs = null;
+try { pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs'); } catch (e) { pdfjs = null; }
+const NUM_TOKEN = /\d(?:[\d.,]|[ \u00a0](?=\d{3}(?!\d)))*\d|\d/g;
+const digitKeys = (text) => new Set(((text || '').match(NUM_TOKEN) || []).map((t) => t.replace(/\D/g, '')).filter((k) => k.length >= 3 && !/^(19|20)\d\d$/.test(k)));
+const wordKeys = (text) => new Set(((text || '').toLowerCase().match(/\p{L}{5,}/gu) || []).map((w) => w.slice(0, 5)));
+// "%8", "8%", "%54,4": yüzdeler iki haneli olsa da ayırt edicidir.
+const percentKeys = (text) => new Set([...(text || '').matchAll(/%\s?(\d{1,3}(?:[.,]\d+)?)|(\d{1,3}(?:[.,]\d+)?)\s?%/g)].map((m) => 'P' + (m[1] || m[2]).replace(/\D/g, '')));
+
+async function pageLines(file) {
+  if (!pdfjs) return null;
+  const data = new Uint8Array(readFileSync(file));
+  const doc = await pdfjs.getDocument({ data, useSystemFonts: true, disableFontFace: true, isEvalSupported: false }).promise;
+  const pages = new Map();
+  for (let n = 1; n <= doc.numPages; n++) {
+    const page = await doc.getPage(n);
+    const [x0, y0, x1, y1] = page.view;
+    const W = x1 - x0, H = y1 - y0;
+    const tc = await page.getTextContent();
+    const items = tc.items.filter((it) => it.str && it.str.trim()).map((it) => {
+      const [, , , , e, f] = it.transform;
+      const h = it.height || Math.abs(it.transform[3]) || 8;
+      return { text: it.str, x: (e - x0) / W, top: (y1 - (f + h)) / H, h: h / H, base: f };
+    });
+    items.sort((a, b) => b.base - a.base || a.x - b.x);
+    const lines = [];
+    for (const it of items) {
+      const last = lines[lines.length - 1];
+      if (last && Math.abs(last.base - it.base) < 2) { last.text += ' ' + it.text; last.top = Math.min(last.top, it.top); last.h = Math.max(last.h, it.h); }
+      else lines.push({ text: it.text, top: it.top, h: it.h, base: it.base });
+    }
+    pages.set(n, lines);
+  }
+  return pages;
+}
+
+// Çıpa dikdörtgeninin kapsadığı satırlar kanıtla eşleşmeli; eşleşen satır başka yerdeyse kayma raporlanır.
+function checkAnchors(result, lines, f) {
+  if (!lines) return;
+  (result.risks || []).forEach((r, i) => {
+    const tag = `risk[${i + 1}]`;
+    // Kanıt rapor dilinde, belge kendi dilinde olabilir; kelimeler belge dilindeki alıntıdan (quote) alınır,
+    // sayılar ve yüzdeler her ikisinden.
+    const src = `${r.evidence || ''} ${r.quote || ''}`;
+    const nums = new Set([...digitKeys(src), ...percentKeys(src)]);
+    // Alıntı bazen rapor diline çevrilmiş gelir; iki kaynağın kelimeleri birlikte kullanılır.
+    const words = new Set([...wordKeys(r.quote), ...wordKeys(r.evidence)]);
+    const keysOf = (text) => new Set([...digitKeys(text), ...percentKeys(text)]);
+    const matches = (text) => (nums.size ? [...keysOf(text)].some((k) => nums.has(k)) : false)
+      || [...wordKeys(text)].filter((w) => words.has(w)).length >= 2;
+    for (const a of r.anchors || []) {
+      const pl = lines.get(a.page) || [];
+      for (const q of a.rects || []) {
+        const covered = pl.filter((l) => l.top + l.h / 2 >= q.y - 0.002 && l.top + l.h / 2 <= q.y + q.h + 0.002);
+        const text = covered.map((l) => l.text).join(' ');
+        if (matches(text)) continue;
+        const hit = pl.find((l) => matches(l.text));
+        const where = hit ? `kanıt satırı y=${hit.top.toFixed(3)} "${hit.text.slice(0, 50)}"` : 'kanıt satırı sayfada bulunamadı';
+        f('konum', `${tag} çıpa y=${q.y.toFixed(3)} h=${q.h.toFixed(3)} kapsadığı metin "${text.slice(0, 50)}" kanıtla eşleşmiyor; ${where}`);
+      }
+    }
+  });
+}
 
 const SCORES = new Set([12, 22, 36, 47, 60, 72, 82, 88, 95]);
 const SEVERITIES = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
@@ -97,7 +164,7 @@ async function runAuditOnce(token, file, lang) {
   throw new Error('6 dakikada bitmedi');
 }
 
-function check(result, lang) {
+function check(result, lang, lines) {
   const fails = [];
   const f = (rule, detail) => fails.push(`${rule}: ${detail}`);
   if (!result) { f('sonuç', 'boş'); return fails; }
@@ -174,6 +241,7 @@ function check(result, lang) {
     for (const p of riskPages) if (!refPages.has(p)) f('referans', `bulgu sayfası ${p} referans listesinde yok`);
     for (const p of refPages) if (!riskPages.has(p)) f('referans', `referans ${p} hiçbir bulguya bağlı değil`);
   }
+  checkAnchors(result, lines, f);
   return fails;
 }
 
@@ -186,17 +254,22 @@ const pad = (s, n) => String(s).padEnd(n);
   const files = readdirSync(DOCS).filter((n) => n.toLowerCase().endsWith('.pdf')).map((n) => join(DOCS, n)).filter((p) => statSync(p).isFile());
   if (!files.length) { console.error(`PDF yok: ${DOCS}`); process.exit(2); }
   const token = await registerDevice();
+  if (!pdfjs) console.log('not: pdfjs-dist yok, çıpa konumları doğrulanmadı (tools/ içinde npm install).');
+  if (DUMP) mkdirSync(DUMP, { recursive: true });
   let totalFail = 0;
   console.log(`${pad('belge', 44)} ${pad('dil', 4)} ${pad('koşu', 5)} ${pad('skor', 5)} ${pad('bulgu', 6)} ${pad('boyalı', 7)} ${pad('süre', 6)} durum`);
   for (const file of files) {
     const perLang = {};
+    let lines = null;
+    try { lines = await pageLines(file); } catch (e) { console.log(`    - pdf.js okuyamadı: ${e.message}`); }
     for (const lang of LANGS) {
       const runs = [];
       for (let k = 1; k <= RUNS; k++) {
         let row;
         try {
           const { result, ms } = await runAudit(token, file, lang);
-          const fails = check(result, lang);
+          if (DUMP) writeFileSync(join(DUMP, `${basename(file, '.pdf')}-${lang}-${k}.json`), JSON.stringify(result, null, 2));
+          const fails = check(result, lang, lines);
           row = { result, fails, ms };
         } catch (e) {
           row = { result: null, fails: [`çalıştırma: ${e.message}`], ms: 0 };

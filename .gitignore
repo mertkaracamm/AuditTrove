@@ -46,3 +46,7 @@ Thumbs.db
 
 test-docs/
 test-docs-long/
+dump/
+tools/node_modules/
+tools/package.json
+tools/package-lock.json

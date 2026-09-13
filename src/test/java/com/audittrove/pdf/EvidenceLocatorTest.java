@@ -78,6 +78,20 @@ class EvidenceLocatorTest {
     }
 
     @Test
+    void aLonelySingleWordHeadingDoesNotRescueAWeakMatch() {
+        // Bilanço sayfası: kanıt aslında başka sayfada; "assets" başlığı + "trade receivables" satırları eşiğe zar zor ulaşırdı.
+        var sheet = new PageText(11, List.of(
+                line("Assets [abstract]", 0),
+                line("CURRENT ASSETS", 1),
+                line("Cash and cash equivalents 4 22.330.114 21.980.984", 2),
+                line("Trade Receivables 68.226.515 65.821.936", 3),
+                line("Trade Receivables Due From Related Parties 27 44.379.203 36.466.844", 4),
+                line("Inventories 9 39.938.955 42.378.541", 5)));
+        var rects = EvidenceLocator.locate("The auditor's report contains an emphasis of matter paragraph titled 'Key Audit Matters' discussing inflation accounting, trade receivables recoverability, cash flow hedge accounting, and deferred tax assets from investment incentives.", sheet);
+        assertThat(rects).isEmpty();
+    }
+
+    @Test
     void unrelatedEvidenceIsNotPainted() {
         assertThat(EvidenceLocator.locate("The auditor expressed an unqualified opinion on the consolidated statements.", CONTRACT)).isEmpty();
         assertThat(EvidenceLocator.locate("", CONTRACT)).isEmpty();

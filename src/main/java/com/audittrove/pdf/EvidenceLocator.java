@@ -140,9 +140,19 @@ public final class EvidenceLocator {
 
     // Sayı yoksa: ardışık üç satırlık pencerede en çok farklı kelime eşleşen yer. Kısa kanıtta iki, uzun kanıtta
     // üç farklı kelime eşleşmesi gerekir; azı rastlantıdır, boyanmaz. Pencerenin eşleşmesiz kenarları kırpılır.
-    private static List<Integer> byWords(List<Set<String>> wordsPerLine, int evidenceWords) {
-        int n = wordsPerLine.size();
+    private static List<Integer> byWords(List<Set<String>> wordsPerLineRaw, int evidenceWords) {
+        int n = wordsPerLineRaw.size();
         if (n == 0 || evidenceWords == 0) return List.of();
+        // Tek kelimeyle tutunan ve iki kelimeli bir komşusu olmayan satır ("CURRENT ASSETS" başlığındaki "assets")
+        // cümlenin parçası değildir; eşiğe katılmaz. Aksi halde yanlış sayfada zayıf eşleşme boyanır.
+        List<Set<String>> wordsPerLine = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            Set<String> w = wordsPerLineRaw.get(i);
+            boolean lonely = w.size() == 1
+                    && (i == 0 || wordsPerLineRaw.get(i - 1).size() < 2)
+                    && (i + 1 >= n || wordsPerLineRaw.get(i + 1).size() < 2);
+            wordsPerLine.add(lonely ? Set.of() : w);
+        }
         int minHits = evidenceWords < 6 ? 2 : 3;
         int bestStart = -1, best = 0;
         for (int s = 0; s < n; s++) {
