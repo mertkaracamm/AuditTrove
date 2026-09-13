@@ -29,7 +29,9 @@ public class MobileAuthFilter extends OncePerRequestFilter {
     private final Map<String, Window> windows = new ConcurrentHashMap<>();
     /** Rapora soru sor: ayrı saatlik pencere, aylık kotaya girmez. */
     private final Map<String, Window> chatWindows = new ConcurrentHashMap<>();
+    private final Map<String, Window> diffWindows = new ConcurrentHashMap<>();
     private final int chatLimitPerHour;
+    private final int diffLimitPerHour;
 
     private record Window(long hourEpoch, AtomicInteger count) {}
 
@@ -37,15 +39,22 @@ public class MobileAuthFilter extends OncePerRequestFilter {
             DeviceTokenService tokenService,
             QuotaService quotaService,
             @Value("${audittrove.security.audit-rate-limit-per-hour:20}") int limitPerHour,
-            @Value("${audittrove.security.chat-rate-limit-per-hour:40}") int chatLimitPerHour) {
+            @Value("${audittrove.security.chat-rate-limit-per-hour:40}") int chatLimitPerHour,
+            @Value("${audittrove.security.diff-rate-limit-per-hour:10}") int diffLimitPerHour) {
         this.tokenService = tokenService;
         this.quotaService = quotaService;
         this.limitPerHour = limitPerHour;
         this.chatLimitPerHour = chatLimitPerHour;
+        this.diffLimitPerHour = diffLimitPerHour;
     }
 
+    // Soru-cevap ve karşılaştırma: aylık inceleme kotasına girmez, kendi saatlik pencereleri var.
     private static boolean isChat(String method, String uri) {
         return "POST".equalsIgnoreCase(method) && "/api/v1/audit/chat".equals(uri);
+    }
+
+    private static boolean isDiff(String method, String uri) {
+        return "POST".equalsIgnoreCase(method) && "/api/v1/audit/diff".equals(uri);
     }
 
     @Override
@@ -67,7 +76,7 @@ public class MobileAuthFilter extends OncePerRequestFilter {
                 && "/api/v1/devices/push-token".equals(uri);
         boolean cancel = "POST".equalsIgnoreCase(method)
                 && uri != null && uri.startsWith("/api/v1/audit/jobs/") && uri.endsWith("/cancel");
-        return !(submit || statusQuery || pushToken || cancel || isChat(method, uri));
+        return !(submit || statusQuery || pushToken || cancel || isChat(method, uri) || isDiff(method, uri));
     }
 
     /** Hafif yollar (durum sorgusu + push token kaydi): rate limit ve kota atlanir, yalnizca token dogrulanir. */
@@ -110,6 +119,15 @@ public class MobileAuthFilter extends OncePerRequestFilter {
         if (isChat(request.getMethod(), request.getRequestURI())) {
             if (!allow(chatWindows, deviceId.get(), chatLimitPerHour)) {
                 reject(response, 429, "Saatlik soru limitine ulaşıldı. Lütfen daha sonra tekrar deneyin.");
+                return;
+            }
+            request.setAttribute(DEVICE_ID_ATTR, deviceId.get());
+            chain.doFilter(request, response);
+            return;
+        }
+        if (isDiff(request.getMethod(), request.getRequestURI())) {
+            if (!allow(diffWindows, deviceId.get(), diffLimitPerHour)) {
+                reject(response, 429, "Saatlik karşılaştırma limitine ulaşıldı. Lütfen daha sonra tekrar deneyin.");
                 return;
             }
             request.setAttribute(DEVICE_ID_ATTR, deviceId.get());

@@ -7,6 +7,8 @@ import com.audittrove.audit.FinancialDocumentAuditService;
 import com.audittrove.chat.ChatRequest;
 import com.audittrove.chat.ChatResponse;
 import com.audittrove.chat.ReportChatService;
+import com.audittrove.diff.DiffResponse;
+import com.audittrove.diff.DocumentDiffService;
 import com.audittrove.security.MobileAuthFilter;
 import com.audittrove.security.QuotaService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -36,17 +38,29 @@ public class AuditController {
     private final AuditJobService jobService;
     private final AuditJobStore jobStore;
     private final ReportChatService chatService;
+    private final DocumentDiffService diffService;
 
     public AuditController(FinancialDocumentAuditService auditService,
                            QuotaService quotaService,
                            AuditJobService jobService,
                            AuditJobStore jobStore,
-                           ReportChatService chatService) {
+                           ReportChatService chatService,
+                           DocumentDiffService diffService) {
         this.auditService = auditService;
         this.quotaService = quotaService;
         this.jobService = jobService;
         this.jobStore = jobStore;
         this.chatService = chatService;
+        this.diffService = diffService;
+    }
+
+    // --- İki sürümü karşılaştır: senkron, durumsuz. Dosyalar işlenir, saklanmaz ---
+    @PostMapping(value = "/audit/diff", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Operation(summary = "İki belge sürümü arasındaki farkları listeler (eski → yeni)")
+    public DiffResponse diff(@RequestParam("oldFile") MultipartFile oldFile,
+                             @RequestParam("newFile") MultipartFile newFile,
+                             @RequestParam(value = "language", required = false) String language) throws IOException {
+        return diffService.diff(oldFile.getBytes(), newFile.getBytes(), language);
     }
 
     // --- Rapora soru sor: durumsuz. Cihaz soruyu, raporu ve sayfa metinlerini gönderir; sunucu hiçbir şey saklamaz ---
