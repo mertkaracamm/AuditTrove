@@ -63,6 +63,21 @@ class EvidenceLocatorTest {
     }
 
     @Test
+    void chartLabelsRepeatingASingleNumberAreNotPainted() {
+        // Sunum sayfası: tablo satırında iki sayı birlikte, grafikte aynı sayılar tek tek etiket.
+        var slide = new PageText(14, List.of(
+                line("ÖZET NET BORÇ / FAVÖK", 0),
+                line("Hazır Değerler 101.048 95.773", 1),
+                line("Net Borç 16.383 48.827", 2),
+                line("16.383", 3),
+                line("48.827", 4),
+                line("Net Borç Net Borç/FAVÖK 0,42x", 5)));
+        var rects = EvidenceLocator.locate("Net debt rose from 16,383 to 48,827 million TL.", slide);
+        assertThat(rects).hasSize(1);
+        assertThat(rects.get(0).y()).isCloseTo(0.14, org.assertj.core.data.Offset.offset(1e-9));
+    }
+
+    @Test
     void unrelatedEvidenceIsNotPainted() {
         assertThat(EvidenceLocator.locate("The auditor expressed an unqualified opinion on the consolidated statements.", CONTRACT)).isEmpty();
         assertThat(EvidenceLocator.locate("", CONTRACT)).isEmpty();

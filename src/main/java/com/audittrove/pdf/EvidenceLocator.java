@@ -115,9 +115,14 @@ public final class EvidenceLocator {
     // Sayının geçtiği satırın komşusu aynı cümleyi sürdürüyorsa (en az iki kelime eşleşmesi) o da boyanır;
     // "Madde 5 - Gecikme ..." başlığı ile "%0,5 oranında" satırı tek paragraf olarak görünür.
     // Tablo satırları paragraf değildir: komşu satır kendisi de sayı dolu bir satırsa (başka bir kalem) alınmaz.
+    // Bir satırda iki sayı birden eşleşiyorsa kanıt o satırdır; aynı sayıların tek tek geçtiği grafik
+    // etiketleri, dipnotlar ve tekrarlar boyanmaz. Böyle bir satır yoksa tek eşleşmeli satırlar kalır.
     private static List<Integer> byNumbers(int[] numberHits, int[] wordHits, List<PageText.Line> lines) {
+        int best = 0;
+        for (int h : numberHits) best = Math.max(best, h);
+        int threshold = best >= 2 ? 2 : 1;
         List<Integer> idx = new ArrayList<>();
-        for (int i = 0; i < numberHits.length; i++) if (numberHits[i] > 0) idx.add(i);
+        for (int i = 0; i < numberHits.length; i++) if (numberHits[i] >= threshold) idx.add(i);
         idx.sort((a, b) -> numberHits[b] != numberHits[a] ? numberHits[b] - numberHits[a] : wordHits[b] - wordHits[a]);
         if (idx.size() > MAX_LINES) idx = new ArrayList<>(idx.subList(0, MAX_LINES));
         Set<Integer> out = new LinkedHashSet<>(idx);
