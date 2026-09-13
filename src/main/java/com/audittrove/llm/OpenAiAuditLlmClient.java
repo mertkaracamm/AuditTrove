@@ -659,6 +659,34 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
     }
 
+    /**
+     * Tek çağrılık, katı şemalı JSON tamamlama. Soru-cevap gibi inceleme dışı işler için; aynı OpenAI
+     * kuyruğu ve 429 yeniden deneme mantığı kullanılır. Yanıt yoksa LlmUnavailableException.
+     */
+    public JsonNode completeJson(String schemaName, Map<String, Object> schema, String system, String user) {
+        if (apiKey.isBlank()) throw new LlmUnavailableException("OPENAI_API_KEY yapılandırılmamış");
+        try {
+            Map<String, Object> body = Map.of(
+                    "model", model,
+                    "temperature", 0,
+                    "seed", 7,
+                    "response_format", Map.of(
+                            "type", "json_schema",
+                            "json_schema", Map.of("name", schemaName, "strict", true, "schema", schema)),
+                    "messages", List.of(
+                            Map.of("role", "system", "content", system),
+                            Map.of("role", "user", "content", user)));
+            JsonNode response = postToLlmWithRetry(body);
+            String content = response.at("/choices/0/message/content").asText();
+            if (content.isBlank()) throw new LlmUnavailableException("Model boş yanıt verdi");
+            return objectMapper.readTree(content);
+        } catch (LlmUnavailableException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new LlmUnavailableException("Model yanıtı alınamadı: " + e.getMessage(), e);
+        }
+    }
+
     private Map<String, Object> extractionSchema() {
         List<String> keys = Arrays.stream(LineItemKey.values()).map(LineItemKey::jsonKey).toList();
         Map<String, Object> item = Map.of(

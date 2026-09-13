@@ -13,7 +13,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.TreeMap;
 import java.util.Map;
 
 @Service
@@ -80,7 +82,15 @@ public class FinancialDocumentAuditService {
     private AuditResponse anchorEvidence(AuditResponse response, byte[] content) {
         try {
             Map<Integer, PageText> pages = PdfGeometry.read(content);
-            return EvidenceLocator.annotate(response, pages);
+            AuditResponse anchored = EvidenceLocator.annotate(response, pages);
+            // Sayfa metinleri de yanıtla iner: soru-cevap için cihaz bunları saklar, sunucu belge tutmaz.
+            List<AuditResponse.PageContent> texts = new ArrayList<>();
+            for (Map.Entry<Integer, PageText> e : new TreeMap<>(pages).entrySet()) {
+                StringBuilder sb = new StringBuilder();
+                for (PageText.Line line : e.getValue().lines()) sb.append(line.text()).append('\n');
+                texts.add(new AuditResponse.PageContent(e.getKey(), sb.toString().strip()));
+            }
+            return anchored.withPageTexts(texts);
         } catch (Exception e) {
             log.warn("Kanit konumlari cikarilamadi, rapor konumsuz donuyor: {}", e.toString());
             return response;

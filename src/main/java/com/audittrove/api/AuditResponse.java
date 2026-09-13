@@ -14,8 +14,13 @@ public record AuditResponse(
         List<String> advisorQuestions,
         List<Reference> references,
         String language,
-        int pageCount) {
-    /** language: raporun dili ("tr"/"en"); arayüz buna kilitlenir. pageCount: belgenin sayfa sayısı ("Sayfa 13 / 18"). */
+        int pageCount,
+        List<PageContent> pageTexts) {
+    /**
+     * language: raporun dili ("tr"/"en"); arayüz buna kilitlenir. pageCount: belgenin sayfa sayısı ("Sayfa 13 / 18").
+     * pageTexts: sayfa metinleri; cihaz saklar, "rapora soru sor" her soruda ilgili sayfaları geri gönderir.
+     * Sunucu belge tutmaz, bu yüzden metin yanıtla birlikte cihaza iner.
+     */
     @JsonCreator
     public AuditResponse {
         riskScore = Math.max(0, Math.min(100, riskScore));
@@ -25,12 +30,36 @@ public record AuditResponse(
         advisorQuestions = advisorQuestions == null ? List.of() : List.copyOf(advisorQuestions);
         references = references == null ? List.of() : List.copyOf(references);
         language = language == null ? "" : language;
+        pageTexts = pageTexts == null ? List.of() : List.copyOf(pageTexts);
     }
 
     public AuditResponse(int riskScore, String scoreRationale, String summary, List<Risk> risks,
                          List<String> recommendations, List<KeyMetric> keyMetrics,
                          List<String> advisorQuestions, List<Reference> references) {
-        this(riskScore, scoreRationale, summary, risks, recommendations, keyMetrics, advisorQuestions, references, null, 0);
+        this(riskScore, scoreRationale, summary, risks, recommendations, keyMetrics, advisorQuestions, references, null, 0, List.of());
+    }
+
+    public AuditResponse(int riskScore, String scoreRationale, String summary, List<Risk> risks,
+                         List<String> recommendations, List<KeyMetric> keyMetrics,
+                         List<String> advisorQuestions, List<Reference> references, String language, int pageCount) {
+        this(riskScore, scoreRationale, summary, risks, recommendations, keyMetrics, advisorQuestions, references, language, pageCount, List.of());
+    }
+
+    public AuditResponse withPageTexts(List<PageContent> pageTexts) {
+        return new AuditResponse(riskScore, scoreRationale, summary, risks, recommendations, keyMetrics, advisorQuestions, references, language, pageCount, pageTexts);
+    }
+
+    /** Sayfa metni olmadan aynı rapor (MCP yanıtı gibi metnin gereksiz olduğu yerler için). */
+    public AuditResponse withoutPageTexts() {
+        return pageTexts.isEmpty() ? this : withPageTexts(List.of());
+    }
+
+    /** Bir sayfanın düz metni; satırlar yeni satırla ayrılmış. */
+    public record PageContent(int page, String text) {
+        @JsonCreator
+        public PageContent {
+            text = text == null ? "" : text;
+        }
     }
 
     /**

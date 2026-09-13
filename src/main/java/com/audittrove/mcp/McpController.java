@@ -64,7 +64,7 @@ public class McpController {
         byte[] pdf = decodePdf(arguments.path("pdfBase64").asText());
         String language = arguments.hasNonNull("language") ? arguments.path("language").asText() : "en";
         String documentType = arguments.hasNonNull("documentType") ? arguments.path("documentType").asText() : "general";
-        String result = objectMapper.writeValueAsString(auditService.audit(filename, pdf, language, documentType));
+        String result = objectMapper.writeValueAsString(auditService.audit(filename, pdf, language, documentType).withoutPageTexts());
         return success(id, Map.of(
                 "content", List.of(Map.of("type", "text", "text", result)),
                 "structuredContent", objectMapper.readTree(result)));

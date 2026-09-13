@@ -4,6 +4,9 @@ import com.audittrove.audit.AuditJob;
 import com.audittrove.audit.AuditJobService;
 import com.audittrove.audit.AuditJobStore;
 import com.audittrove.audit.FinancialDocumentAuditService;
+import com.audittrove.chat.ChatRequest;
+import com.audittrove.chat.ChatResponse;
+import com.audittrove.chat.ReportChatService;
 import com.audittrove.security.MobileAuthFilter;
 import com.audittrove.security.QuotaService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -15,6 +18,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -31,15 +35,25 @@ public class AuditController {
     private final QuotaService quotaService;
     private final AuditJobService jobService;
     private final AuditJobStore jobStore;
+    private final ReportChatService chatService;
 
     public AuditController(FinancialDocumentAuditService auditService,
                            QuotaService quotaService,
                            AuditJobService jobService,
-                           AuditJobStore jobStore) {
+                           AuditJobStore jobStore,
+                           ReportChatService chatService) {
         this.auditService = auditService;
         this.quotaService = quotaService;
         this.jobService = jobService;
         this.jobStore = jobStore;
+        this.chatService = chatService;
+    }
+
+    // --- Rapora soru sor: durumsuz. Cihaz soruyu, raporu ve sayfa metinlerini gönderir; sunucu hiçbir şey saklamaz ---
+    @PostMapping(value = "/audit/chat", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @Operation(summary = "İncelenen belge hakkında soru cevaplar (durumsuz; rapor ve sayfa metni istekle gelir)")
+    public ChatResponse chat(@RequestBody ChatRequest request) {
+        return chatService.answer(request);
     }
 
     // --- Senkron (kucuk belgeler + geriye uyumluluk; eski istemciler bunu kullanir) ---

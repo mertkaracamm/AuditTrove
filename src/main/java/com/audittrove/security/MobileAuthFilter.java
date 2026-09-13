@@ -27,16 +27,25 @@ public class MobileAuthFilter extends OncePerRequestFilter {
 
     /** deviceId -> (pencere başlangıç saati, sayaç) */
     private final Map<String, Window> windows = new ConcurrentHashMap<>();
+    /** Rapora soru sor: ayrı saatlik pencere, aylık kotaya girmez. */
+    private final Map<String, Window> chatWindows = new ConcurrentHashMap<>();
+    private final int chatLimitPerHour;
 
     private record Window(long hourEpoch, AtomicInteger count) {}
 
     public MobileAuthFilter(
             DeviceTokenService tokenService,
             QuotaService quotaService,
-            @Value("${audittrove.security.audit-rate-limit-per-hour:20}") int limitPerHour) {
+            @Value("${audittrove.security.audit-rate-limit-per-hour:20}") int limitPerHour,
+            @Value("${audittrove.security.chat-rate-limit-per-hour:40}") int chatLimitPerHour) {
         this.tokenService = tokenService;
         this.quotaService = quotaService;
         this.limitPerHour = limitPerHour;
+        this.chatLimitPerHour = chatLimitPerHour;
+    }
+
+    private static boolean isChat(String method, String uri) {
+        return "POST".equalsIgnoreCase(method) && "/api/v1/audit/chat".equals(uri);
     }
 
     @Override
@@ -58,7 +67,7 @@ public class MobileAuthFilter extends OncePerRequestFilter {
                 && "/api/v1/devices/push-token".equals(uri);
         boolean cancel = "POST".equalsIgnoreCase(method)
                 && uri != null && uri.startsWith("/api/v1/audit/jobs/") && uri.endsWith("/cancel");
-        return !(submit || statusQuery || pushToken || cancel);
+        return !(submit || statusQuery || pushToken || cancel || isChat(method, uri));
     }
 
     /** Hafif yollar (durum sorgusu + push token kaydi): rate limit ve kota atlanir, yalnizca token dogrulanir. */
@@ -97,7 +106,18 @@ public class MobileAuthFilter extends OncePerRequestFilter {
             return;
         }
 
-        if (!allow(deviceId.get())) {
+        // Soru-cevap: inceleme kotasına dokunmaz, yalnızca kendi saatlik sınırı var.
+        if (isChat(request.getMethod(), request.getRequestURI())) {
+            if (!allow(chatWindows, deviceId.get(), chatLimitPerHour)) {
+                reject(response, 429, "Saatlik soru limitine ulaşıldı. Lütfen daha sonra tekrar deneyin.");
+                return;
+            }
+            request.setAttribute(DEVICE_ID_ATTR, deviceId.get());
+            chain.doFilter(request, response);
+            return;
+        }
+
+        if (!allow(windows, deviceId.get(), limitPerHour)) {
             reject(response, 429,
                     "Saatlik inceleme limitine ulaşıldı. Lütfen daha sonra tekrar deneyin.");
             return;
@@ -120,7 +140,7 @@ public class MobileAuthFilter extends OncePerRequestFilter {
         chain.doFilter(request, response);
     }
 
-    private boolean allow(String deviceId) {
+    private static boolean allow(Map<String, Window> windows, String deviceId, int limit) {
         long hour = System.currentTimeMillis() / 3_600_000L;
         Window w = windows.compute(deviceId, (k, cur) ->
                 cur == null || cur.hourEpoch() != hour
@@ -129,7 +149,7 @@ public class MobileAuthFilter extends OncePerRequestFilter {
         if (windows.size() > 10_000) {
             windows.entrySet().removeIf(e -> e.getValue().hourEpoch() != hour);
         }
-        return w.count().incrementAndGet() <= limitPerHour;
+        return w.count().incrementAndGet() <= limit;
     }
 
     private void reject(HttpServletResponse response, int status, String message)
