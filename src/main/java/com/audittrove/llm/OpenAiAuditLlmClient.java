@@ -326,6 +326,23 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 CompletableFuture.supplyAsync(() -> rubricFindings(documentText, lang, documentType), sideTaskExecutor));
     }
 
+    // Kontrol listesi skorun yarısıdır: ilk deneme başarısızsa bir kez daha denenir, o da olmazsa
+    // inceleme hata verir. Listesiz "temiz" rapor üretmek, hata vermekten kötüdür.
+    private List<AuditResponse.Risk> awaitRubric(CompletableFuture<List<AuditResponse.Risk>> f,
+                                                 String documentText, Lang lang, String documentType) {
+        try {
+            return f.get(120, TimeUnit.SECONDS);
+        } catch (Exception first) {
+            log.warn("Kontrol listesi ilk denemede alinamadi ({}), tekrar deneniyor", first.toString());
+        }
+        try {
+            return rubricFindings(documentText, lang, documentType);
+        } catch (Exception second) {
+            log.error("Kontrol listesi ikinci denemede de alinamadi: {}", second.toString());
+            throw new LlmUnavailableException("Kontrol listesi tamamlanamadı; inceleme tekrar denenmeli");
+        }
+    }
+
     private static <T> T await(CompletableFuture<T> f, T fallback, String what) {
         try {
             return f.get(90, TimeUnit.SECONDS);
@@ -706,11 +723,17 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         try {
             List<String> chunks = splitIntoChunks(documentText);
             if (chunks.isEmpty()) return List.of();
-            // Tür kullanıcının seçiminden; seçmediyse kısa bir sınıflandırma çağrısı (üç model oyu) karar verir.
-            // Sonra yalnızca o türün soruları sorulur: 45 madde yerine 6-8, cevap altı kat kısa, çağrı o kadar hızlı.
-            RubricItem.Kind kind = kindFromDocumentType(documentType);
-            if (kind == null) kind = classifyKind(chunks.get(0));
-            List<RubricItem> items = RubricItem.forKind(kind);
+            // Tür: kısa sınıflandırma (üç model oyu) her zaman koşar. Kullanıcı tür seçtiyse onun soruları
+            // sorulur; sınıflandırma başka bir tür diyorsa o türün soruları da eklenir. Yanlış seçilen tür
+            // ("kira" seçili unutulmuş iş sözleşmesi) böylece temiz rapora değil, birkaç ek soruya mal olur.
+            RubricItem.Kind picked = kindFromDocumentType(documentType);
+            RubricItem.Kind detected = classifyKind(chunks.get(0));
+            RubricItem.Kind kind = picked != null ? picked : detected;
+            List<RubricItem> items = new ArrayList<>(RubricItem.forKind(kind));
+            if (picked != null && detected != picked && detected != RubricItem.Kind.GENERAL && detected != RubricItem.Kind.OTHER) {
+                log.warn("Belge turu uyusmuyor: secilen={} algilanan={} — iki turun sorulari birlikte soruluyor", picked, detected);
+                items.addAll(RubricItem.forKind(detected));
+            }
             if (items.isEmpty()) return List.of();
             // Kontrol listesi her zaman İngilizce cevaplanır: var/yok kararı rapor diline bağlı olmasın.
             // Kanıt cümleleri sonda dil kapısı tarafından rapor diline çevrilir.
@@ -724,7 +747,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             }
             List<List<RubricResult>> votesByChunk = new ArrayList<>();
             for (CompletableFuture<List<RubricResult>> f : perChunk) votesByChunk.add(f.get());
-            if (votesByChunk.get(0).isEmpty()) return List.of();
+            // Herhangi bir parçanın birincil cevabı yoksa liste eksiktir; eksik listeyle skor üretilmez.
+            for (List<RubricResult> votes : votesByChunk) {
+                if (votes.isEmpty()) throw new RubricUnavailableException("Kontrol listesi birincil cevabi alinamadi", null);
+            }
 
             List<AuditResponse.Risk> out = new ArrayList<>();
             for (RubricItem item : items) {
@@ -750,10 +776,17 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             }
             log.info("Kontrol listesi: tur={} parca={} bulgu={}", kind, chunks.size(), out.size());
             return out;
+        } catch (RubricUnavailableException e) {
+            throw e;
         } catch (Exception e) {
-            log.warn("Kontrol listesi calismadi, LLM bulgulariyla devam: {}", e.toString());
-            return List.of();
+            throw new RubricUnavailableException("Kontrol listesi calismadi: " + e, e);
         }
+    }
+
+    // Kontrol listesi olmadan skor hesaplanamaz: listesiz rapor "temiz" görünür, bu yanlış rapordur.
+    // Bu yüzden liste alınamazsa inceleme hata verir, 95 basmaz.
+    static final class RubricUnavailableException extends RuntimeException {
+        RubricUnavailableException(String message, Throwable cause) { super(message, cause); }
     }
 
     // Bir parça için oylar: ikinciller birincille aynı anda başlar, birincil listenin başında döner.
@@ -1031,7 +1064,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 await(side.extraction(), StatementExtraction.none(), "Gelir tablosu cikarimi"), pages, lang);
         // 0b) Kontrol listesi: belge tipine göre sabit sorular, sabit başlık ve önem. Skoru motor + rubrik
         //     belirler; LLM'in serbest bulguları "model" kaynaklı ek gözlem olarak kalır, en fazla iki tane.
-        List<AuditResponse.Risk> rubric = await(side.rubric(), List.of(), "Kontrol listesi");
+        List<AuditResponse.Risk> rubric = awaitRubric(side.rubric(), documentText, lang, documentType);
         {
             List<AuditResponse.Risk> combined = new ArrayList<>(rules.findings());
             combined.addAll(rubric);

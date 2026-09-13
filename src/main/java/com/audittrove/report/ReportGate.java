@@ -53,11 +53,18 @@ public final class ReportGate {
      * Gösterge değerinde birim gömülüyse ayırır ("594,995,138 thousand TL" → value + unit).
      * Ne sayı ne kısa metin olan değer (uzun cümle) düşer (null).
      */
+    // Tarihin parçası gösterge olamaz: "Ruhsat veriliş günü: 19", "ayı: mar" gibi kartlar düşer; tarih tek kartta kalır.
+    private static final Pattern DATE_PART_LABEL = Pattern.compile("(?i)\\b(gün|günü|ay|ayı|yıl|yılı|day|month|year)\\b");
+    private static final Pattern MONTH_ABBR = Pattern.compile("(?i)^(oca|şub|sub|mar|nis|may|haz|tem|ağu|agu|eyl|eki|kas|ara|jan|feb|apr|jun|jul|aug|sep|oct|nov|dec)[a-zçğıöşü]*\\.?$");
+
     public static AuditResponse.KeyMetric gateMetric(AuditResponse.KeyMetric m) {
         if (m == null || m.value() == null) return null;
         String value = m.value().trim();
         String unit = m.unit() == null ? "" : m.unit().trim();
         if (value.isEmpty()) return null;
+        String label = m.label() == null ? "" : m.label();
+        if (MONTH_ABBR.matcher(value).matches()) return null;
+        if (unit.isEmpty() && value.matches("\\d{1,2}") && DATE_PART_LABEL.matcher(label).find()) return null;
         Matcher v = VALUE_WITH_UNIT.matcher(value);
         if (v.matches()) {
             String number = v.group(2).trim();

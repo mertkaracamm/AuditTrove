@@ -108,6 +108,12 @@ class ReportContractTest {
         var both = ReportGate.gateMetric(new AuditResponse.KeyMetric("Salary", "EUR 84,000 gross", "", ""));
         assertThat(both.value()).isEqualTo("84,000");
         assertThat(both.unit()).isEqualTo("EUR gross");
+
+        // Tarih parçaları gösterge değil.
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Ruhsat veriliş günü", "19", "", ""))).isNull();
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Ruhsat veriliş ayı", "mar", "", ""))).isNull();
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Ruhsat tarihi", "29.01.2021", "", "")).value()).isEqualTo("29.01.2021");
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric("Süre", "12", "ay", "")).value()).isEqualTo("12");
     }
 
     @Test
