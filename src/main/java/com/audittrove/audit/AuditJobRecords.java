@@ -38,6 +38,14 @@ public class AuditJobRecords {
             )
             """;
 
+    // Eski kurulumlarda kolon yoksa eklenir; "kapanıyor" damgası bunun için.
+    private static final String ALTER_SQL =
+            "ALTER TABLE audit_jobs ADD COLUMN IF NOT EXISTS draining_at BIGINT";
+
+    // Sunucu kapanma sinyali aldığında süren işler damgalanır; telefon beklemede kalmasın.
+    private static final String MARK_DRAINING_SQL =
+            "UPDATE audit_jobs SET draining_at = ? WHERE id = ? AND status IN ('PENDING', 'PROCESSING')";
+
     private static final String UPSERT_SQL = """
             INSERT INTO audit_jobs (id, device_id, file_name, language, status, result, error, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -46,7 +54,7 @@ public class AuditJobRecords {
             """;
 
     private static final String SELECT_SQL =
-            "SELECT device_id, file_name, language, status, result, error, created_at, updated_at FROM audit_jobs WHERE id = ?";
+            "SELECT device_id, file_name, language, status, result, error, created_at, updated_at, draining_at FROM audit_jobs WHERE id = ?";
 
     private static final String DELETE_OLD_SQL = "DELETE FROM audit_jobs WHERE created_at < ?";
 
@@ -109,11 +117,26 @@ public class AuditJobRecords {
                 job.setResult(deserialize(rs.getString(5)));
                 job.setError(rs.getString(6));
                 job.setUpdatedAt(rs.getLong(8));
+                long draining = rs.getLong(9);
+                job.setDrainingAt(rs.wasNull() ? 0L : draining);
                 return job;
             }
         } catch (Exception e) {
             log.warn("Is kaydi okunamadi (job {}): {}", id, e.getMessage());
             return null;
+        }
+    }
+
+    /** Kapanma sinyali geldi: bu iş bu kopyayla birlikte ölüyor olabilir. */
+    public void markDraining(String id) {
+        if (!isEnabled() || id == null) return;
+        try (Connection c = connect();
+             PreparedStatement s = c.prepareStatement(MARK_DRAINING_SQL)) {
+            s.setLong(1, System.currentTimeMillis());
+            s.setString(2, id);
+            s.executeUpdate();
+        } catch (SQLException e) {
+            log.warn("Kapanma damgasi yazilamadi (job {}): {}", id, e.getMessage());
         }
     }
 
@@ -152,9 +175,9 @@ public class AuditJobRecords {
     }
 
     private void initSchema() {
-        try (Connection c = connect();
-             PreparedStatement s = c.prepareStatement(CREATE_SQL)) {
-            s.executeUpdate();
+        try (Connection c = connect()) {
+            try (PreparedStatement s = c.prepareStatement(CREATE_SQL)) { s.executeUpdate(); }
+            try (PreparedStatement s = c.prepareStatement(ALTER_SQL)) { s.executeUpdate(); }
         } catch (SQLException e) {
             log.error("audit_jobs tablosu olusturulamadi: {}", e.getMessage());
         }

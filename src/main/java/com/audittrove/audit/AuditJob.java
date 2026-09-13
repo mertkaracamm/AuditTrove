@@ -18,6 +18,7 @@ public class AuditJob {
     private final String language;      // bildirim dili icin
     private final long createdAt;
     private volatile long updatedAt;
+    private volatile long drainingAt;   // sunucu kapanırken damgalanır; 0 = damga yok
     private volatile Status status;
     private volatile AuditResponse result;
     private volatile String error;
@@ -55,6 +56,8 @@ public class AuditJob {
     public long createdAt() { return createdAt; }
     public long updatedAt() { return updatedAt; }
     public void setUpdatedAt(long updatedAt) { this.updatedAt = updatedAt; }
+    public long drainingAt() { return drainingAt; }
+    public void setDrainingAt(long drainingAt) { this.drainingAt = drainingAt; }
     public Status status() { return status; }
     public void setStatus(Status status) { this.status = status; this.updatedAt = System.currentTimeMillis(); }
     public AuditResponse result() { return result; }

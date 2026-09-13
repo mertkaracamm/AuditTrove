@@ -1,6 +1,8 @@
 package com.audittrove.audit;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.event.ContextClosedEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -18,8 +20,9 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class AuditJobStore {
     private static final long TTL_MS = 30 * 60 * 1000L;   // kayıt 30 dk sonra silinir
-    static final long DEFAULT_STALE_MS = 3 * 60 * 1000L;  // bu kadar güncellenmeyen iş yarıda kalmış sayılır
-    private static final long HEARTBEAT_MS = 60 * 1000L;  // süren işin kaydına "yaşıyorum" damgası
+    static final long DEFAULT_STALE_MS = 90 * 1000L;      // bu kadar güncellenmeyen iş yarıda kalmış sayılır
+    static final long DRAIN_GRACE_MS = 20 * 1000L;        // kapanma damgasından sonra bitmeyen iş yarıda kalmıştır
+    private static final long HEARTBEAT_MS = 30 * 1000L;  // süren işin kaydına "yaşıyorum" damgası
 
     private final Map<String, AuditJob> jobs = new ConcurrentHashMap<>();
     private final AuditJobRecords records;
@@ -46,7 +49,7 @@ public class AuditJobStore {
     public AuditJob get(String id) {
         AuditJob job = jobs.get(id);
         if (job == null) job = records.find(id);   // başka kopyanın ya da önceki sürümün işi
-        if (job != null && isStale(job.status(), job.updatedAt(), System.currentTimeMillis(), staleMs)) {
+        if (job != null && isStale(job.status(), job.updatedAt(), job.drainingAt(), System.currentTimeMillis(), staleMs)) {
             job.setStatus(AuditJob.Status.INTERRUPTED);
         }
         return job;
@@ -56,10 +59,28 @@ public class AuditJobStore {
         jobs.remove(id);
     }
 
-    /** Devam ediyor görünen ama uzun süredir kımıldamayan iş: sunucu yeniden başlamış demektir. */
-    static boolean isStale(AuditJob.Status status, long updatedAt, long now, long staleMs) {
+    /**
+     * Devam ediyor görünen iş gerçekten yaşıyor mu? İki işaret: kapanma damgası (sunucu SIGTERM aldı, iş
+     * kısa sürede bitmediyse o kopyayla gitti) ve uzun süredir güncellenmeme (sert çökme; damga yazılamamış).
+     */
+    static boolean isStale(AuditJob.Status status, long updatedAt, long drainingAt, long now, long staleMs) {
         if (status != AuditJob.Status.PENDING && status != AuditJob.Status.PROCESSING) return false;
+        if (drainingAt > 0 && now - drainingAt > DRAIN_GRACE_MS) return true;
         return now - updatedAt > staleMs;
+    }
+
+    /**
+     * Kapanma sinyali: süren işler damgalanır. Bean yıkımından önce çalışır, çünkü iş havuzu kapanırken
+     * uzun süre bloke olabilir ve o sırada damga yazılamazdı. İş yine de biterse durum DONE olur, damga önemsizleşir.
+     */
+    @EventListener(ContextClosedEvent.class)
+    public void onShutdownSignal() {
+        if (!records.isEnabled()) return;
+        for (AuditJob job : jobs.values()) {
+            if (job.status() == AuditJob.Status.PENDING || job.status() == AuditJob.Status.PROCESSING) {
+                records.markDraining(job.id());
+            }
+        }
     }
 
     /** Süren işler kaydına dokunur; uzun bir inceleme yanlışlıkla yarıda kalmış sayılmasın. */
