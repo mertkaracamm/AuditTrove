@@ -198,8 +198,11 @@ function check(result, lang, lines) {
   const counted = risks.filter((r) => r.source !== 'model' && !/^(Cross-check:|Çapraz doğrulama:)/.test(r.title || ''));
   const rank = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
   const top = Math.max(0, ...counted.map((r) => rank[r.severity] || 0));
-  const few = counted.length <= 3;
-  const expected = { 4: few ? 22 : 12, 3: few ? 47 : 36, 2: few ? 72 : 60, 1: few ? 88 : 82, 0: 95 }[top];
+  // Sunucudaki ScoreScale ile aynı: bulgular sayılmaz, ağırlıkları toplanır. Tek bir düşük önemli
+  // bulgu eşiği geçirmesin diye; iki yerde iki kural olursa hangisinin doğru olduğu belirsizleşir.
+  const weight = counted.reduce((sum, r) => sum + (rank[r.severity] || 0), 0);
+  const light = weight <= 4;
+  const expected = { 4: light ? 22 : 12, 3: light ? 47 : 36, 2: light ? 72 : 60, 1: light ? 88 : 82, 0: 95 }[top];
   if (!SCORES.has(result.riskScore)) f('skor', `${result.riskScore} tanımlı 9 değerden değil`);
   else if (result.riskScore !== expected) f('skor', `${result.riskScore}, bulgulara göre ${expected} olmalıydı`);
 
