@@ -1156,6 +1156,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 claimed.retainAll(pages.keySet());
                 found = new ArrayList<>(claimed);
             }
+            // Sayfası bulunamayan ek gözlem rapora girmez: kullanıcıya "her bulgu geldiği sayfada
+            // işaretli" diyoruz, tıklanınca gidecek yeri olmayan satır bu sözü bozar. Kontrol
+            // listesi ve motor bulguları zaten sayfalarını kendileri getirir.
+            if (found.isEmpty() && risk.isModel()) {
+                log.warn("Ek gozlem sayfaya baglanamadi, dusuruldu: {}", risk.title());
+                continue;
+            }
             AuditResponse.Risk gated = ReportGate.gateRisk(
                     new AuditResponse.Risk(risk.title(), risk.severity(), fi.text(), ev.text(), found, risk.source(), risk.quote()));
             if (gated == null) {

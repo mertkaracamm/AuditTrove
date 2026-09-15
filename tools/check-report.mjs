@@ -57,6 +57,33 @@ async function pageLines(file) {
 }
 
 // Çıpa dikdörtgeninin kapsadığı satırlar kanıtla eşleşmeli; eşleşen satır başka yerdeyse kayma raporlanır.
+const flatten = (t) => (t || '')
+  .replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"')
+  .replace(/[\u2013\u2014]/g, '-').replace(/\u00a0/g, ' ')
+  .replace(/\s+/g, ' ').trim().toLowerCase();
+
+// Alıntı belgeden kelimesi kelimesine alındığı için önce birebir aranır: satırlar birleştirilip
+// bakılır, böylece satır sonuna denk gelen alıntı da bulunur. Kelime sayma yöntemi burada yanılıyordu —
+// "The vehicle is sold" cümlesinde eşleşecek tek uzun kelime var, başlık satırı ise iki kelime
+// tutturup kendini doğru yer sanıyordu.
+function literalSpan(quote, pl) {
+  const needle = flatten(quote);
+  if (needle.length < 12) return null;
+  let joined = '';
+  const lineOf = [];
+  pl.forEach((l, idx) => {
+    const t = flatten(l.text);
+    if (!t) return;
+    if (joined) { joined += ' '; lineOf.push(idx); }
+    for (let c = 0; c < t.length; c++) lineOf.push(idx);
+    joined += t;
+  });
+  const at = joined.indexOf(needle);
+  if (at < 0) return null;
+  const end = Math.min(lineOf.length - 1, at + needle.length - 1);
+  return { from: lineOf[at], to: lineOf[end] };
+}
+
 function checkAnchors(result, lines, f, note) {
   if (!lines) return;
   (result.risks || []).forEach((r, i) => {
@@ -72,8 +99,18 @@ function checkAnchors(result, lines, f, note) {
       || [...wordKeys(text)].filter((w) => words.has(w)).length >= 2;
     for (const a of r.anchors || []) {
       const pl = lines.get(a.page) || [];
+      const span = literalSpan(r.quote, pl);
       for (const q of a.rects || []) {
         const covered = pl.filter((l) => l.top + l.h / 2 >= q.y - 0.002 && l.top + l.h / 2 <= q.y + q.h + 0.002);
+        // Alıntı sayfada birebir bulunduysa doğrulama nettir: çıpa o satırlara değiyor mu?
+        if (span) {
+          const touches = pl.some((l, idx) => idx >= span.from && idx <= span.to
+            && l.top + l.h >= q.y - 0.004 && l.top <= q.y + q.h + 0.004);
+          if (touches) continue;
+          const at = pl[span.from];
+          f('konum', `${tag} çıpa y=${q.y.toFixed(3)} h=${q.h.toFixed(3)} alıntının yerine değmiyor; alıntı y=${at.top.toFixed(3)} "${at.text.slice(0, 50)}"`);
+          continue;
+        }
         const text = covered.map((l) => l.text).join(' ');
         if (matches(text)) continue;
         const hit = pl.find((l) => matches(l.text));
