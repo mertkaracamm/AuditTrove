@@ -995,7 +995,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                         "id", Map.of("type", "string", "enum", ids),
                         "present", Map.of("type", "boolean"),
                         "evidence", Map.of("type", "string"),
-                        "quote", Map.of("type", "string"),
+                        "quote", Map.of("type", "string", "description",
+                                "Verbatim excerpt copied from the document, in the document's own language. Never translate."),
                         "page", Map.of("type", "integer")));
         return Map.of(
                 "type", "object", "additionalProperties", false,
@@ -1783,9 +1784,12 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         String name = lang.isTurkish() ? "Turkish" : "English";
         return "\nOUTPUT LANGUAGE: " + name + ". Write EVERY textual field (summary, scoreRationale, finding titles,"
                 + " finding text, evidence, recommendations, keyMetrics labels/units/notes, advisorQuestions) in "
-                + name + ", regardless of the language of the document. When you quote or paraphrase the document,"
+                + name + ", regardless of the language of the document. When you paraphrase the document,"
                 + " render it in " + name + " as well; keep numbers, dates, currency and note references exactly as printed."
-                + " Never mix languages within the report.";
+                + " Never mix languages within the report."
+                // Alıntı çevrilirse belgede aranamaz, bulgu sayfa üzerinde işaretlenemez. Tek istisna bu alan.
+                + " THE ONLY EXCEPTION IS the 'quote' field: copy it character by character from the document,"
+                + " in the document's own language. Never translate, shorten or rewrite a quote.";
     }
 
     private String userPrompt(String documentText, List<RegulationChunk> context) {
@@ -1814,7 +1818,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                         "severity", Map.of("type", "string", "enum", List.of("LOW", "MEDIUM", "HIGH", "CRITICAL")),
                         "finding", Map.of("type", "string"),
                         "evidence", Map.of("type", "string"),
-                        "quote", Map.of("type", "string")));
+                        "quote", Map.of("type", "string", "description",
+                                "Verbatim excerpt copied from the document, in the document's own language. Never translate.")));
         Map<String, Object> reference = Map.of(
                 "type", "object",
                 "additionalProperties", false,
