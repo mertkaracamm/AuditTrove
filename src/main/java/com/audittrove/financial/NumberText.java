@@ -1,6 +1,8 @@
 package com.audittrove.financial;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -56,6 +58,17 @@ public final class NumberText {
     /** Ayraç etrafındaki kaçak boşluklar kaldırılmış metin; sayı tanıma öncesi uygulanır. */
     public static String joinSplitNumbers(String text) {
         return text == null ? null : STRAY_SPACE.matcher(text).replaceAll("");
+    }
+
+    /** Metindeki sayı adayları, belgede yazıldıkları biçimde. Kanıt tarafı da sayfa tarafı da bunu
+     *  kullanmalı: ayrı kalıp kullanılınca "4 180,0" bir yerde tek sayı, ötekinde "4" ve "180,0"
+     *  oluyordu ve bulgu yanlış sayfaya bağlanıyordu. */
+    public static List<String> tokens(String text) {
+        List<String> out = new ArrayList<>();
+        if (text == null) return out;
+        Matcher m = TOKEN.matcher(joinSplitNumbers(text));
+        while (m.find()) out.add(m.group());
+        return out;
     }
 
     /** Sayfa metnindeki tüm sayıların rakam anahtarları; aynı sayı hangi biçimde yazılsa da bulunur. */

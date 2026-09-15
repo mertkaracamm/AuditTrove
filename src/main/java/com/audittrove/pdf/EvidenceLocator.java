@@ -23,7 +23,6 @@ import java.util.regex.Pattern;
 public final class EvidenceLocator {
     private EvidenceLocator() {}
 
-    private static final Pattern ANCHOR_TOKEN = Pattern.compile("\\d[\\d.,]*\\d|\\d");
     private static final Pattern YEAR_LIKE = Pattern.compile("(?:19|20)\\d{2}");
     private static final Pattern WORD_TOKEN = Pattern.compile("\\p{L}{5,}");
     private static final Pattern PROPER_NOUN = Pattern.compile("\\b\\p{Lu}\\p{Ll}{3,}\\b");
@@ -281,9 +280,7 @@ public final class EvidenceLocator {
     // Kanıttaki sayı çıpaları: en az üç rakam ya da ondalıklı; düz yıl çıpa değil. Yüzdeler ayrı anahtar.
     static Set<String> numberKeys(String text) {
         Set<String> keys = new LinkedHashSet<>();
-        Matcher m = ANCHOR_TOKEN.matcher(text);
-        while (m.find()) {
-            String tok = m.group();
+        for (String tok : NumberText.tokens(text)) {
             if (YEAR_LIKE.matcher(tok).matches()) continue;
             String key = NumberText.digits(tok);
             boolean decimal = tok.matches(".*[.,]\\d{1,2}$") && key.length() >= 2;

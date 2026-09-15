@@ -1644,7 +1644,6 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
     private static final Pattern PAGE_MARKER = Pattern.compile("\\[REPORT PAGE (\\d+)\\]");
     // Çıpa: en az 3 rakamlı ya da ondalıklı sayılar; düz yıl (2024) çıpa sayılmaz.
-    private static final Pattern ANCHOR_TOKEN = Pattern.compile("\\d[\\d.,]*\\d|\\d");
     private static final Pattern YEAR_LIKE = Pattern.compile("(?:19|20)\\d{2}");
 
     private Map<Integer, String> splitPages(String documentText) {
@@ -1676,9 +1675,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         // Tek sayfalık belgede aranacak bir şey yok.
         if (pages.size() == 1) return List.copyOf(pages.keySet());
         Set<String> anchors = new LinkedHashSet<>();
-        Matcher m = ANCHOR_TOKEN.matcher(evidence);
-        while (m.find()) {
-            String tok = m.group();
+        // Sayfa anahtarları NumberText ile üretiliyor; kanıt da aynı tokenizer'dan geçmeli, yoksa
+        // boşluk ayraçlı sayılar ("4 180,0") iki tarafta farklı bölünüp bulgu yanlış sayfaya gider.
+        for (String tok : NumberText.tokens(evidence)) {
             String key = NumberText.digits(tok);
             boolean decimal = tok.matches(".*[.,]\\d{1,2}$") && key.length() >= 2;
             if (YEAR_LIKE.matcher(tok).matches()) continue;

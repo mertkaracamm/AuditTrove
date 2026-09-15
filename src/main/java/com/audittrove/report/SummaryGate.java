@@ -23,7 +23,6 @@ public final class SummaryGate {
     private SummaryGate() {}
 
     private static final Pattern SENTENCE_END = Pattern.compile("(?<=[.!?])\\s+(?=\\p{Lu}|\\d|\"|“)");
-    private static final Pattern ANCHOR_TOKEN = Pattern.compile("\\d[\\d.,]*\\d|\\d");
     private static final Pattern YEAR_LIKE = Pattern.compile("(?:19|20)\\d{2}");
     private static final Pattern PROPER_NOUN = Pattern.compile("\\b\\p{Lu}\\p{Ll}{3,}\\b");
     private static final Pattern WORD_TOKEN = Pattern.compile("\\p{L}{5,}");
@@ -57,9 +56,8 @@ public final class SummaryGate {
     /** Cümlenin dayanağı var mı: belgedeki sayı, belgedeki özel ad ya da bir bulguyla kelime örtüşmesi. */
     static boolean grounded(String sentence, Set<String> docNumbers, Set<String> docProperNouns,
                             List<Set<String>> findingWords) {
-        Matcher m = ANCHOR_TOKEN.matcher(sentence);
-        while (m.find()) {
-            String tok = m.group();
+        // Sayılar belgedeki anahtarlarla karşılaştırılıyor; ikisi de aynı tokenizer'dan geçmeli.
+        for (String tok : NumberText.tokens(sentence)) {
             if (YEAR_LIKE.matcher(tok).matches()) continue;
             String key = NumberText.digits(tok);
             boolean decimal = tok.matches(".*[.,]\\d{1,2}$") && key.length() >= 2;
