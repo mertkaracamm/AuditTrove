@@ -10,6 +10,14 @@ spring:
       max-request-size: ${MAX_REQUEST_SIZE:32MB}
 server:
   port: ${PORT:8080}
+  tomcat:
+    accesslog:
+      # Istek basina satir yazilmazsa bir sorun cikinca elimizde hicbir sey kalmiyor; sure de gerekli.
+      enabled: ${ACCESS_LOG:true}
+      directory: /tmp
+      prefix: access
+      suffix: .log
+      pattern: '%t %s %D %r'
   shutdown: graceful
   forward-headers-strategy: framework
 management:
@@ -45,6 +53,11 @@ audittrove:
     usage-database-url: ${USAGE_DATABASE_URL:}
     # Ucretsiz kullanicinin aylik inceleme hakki
     free-monthly-limit: ${FREE_MONTHLY_LIMIT:5}
+  web:
+    # Hesapsiz web ziyaretcisinin aylik ucretsiz inceleme hakki (IP basina).
+    free-monthly-limit: ${WEB_FREE_MONTHLY_LIMIT:2}
+    # Cloudflare Turnstile gizli anahtari. Bos ise bot dogrulamasi kapali (yalniz lokal gelistirme).
+    turnstile-secret: ${TURNSTILE_SECRET:}
   openai:
     api-key: ${OPENAI_API_KEY:}
     base-url: ${OPENAI_BASE_URL:https://api.openai.com}

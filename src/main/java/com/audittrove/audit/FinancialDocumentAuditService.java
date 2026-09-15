@@ -14,7 +14,10 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.TreeMap;
 import java.util.Map;
 
@@ -53,6 +56,60 @@ public class FinancialDocumentAuditService {
         } catch (IOException exception) {
             throw new InvalidDocumentException("Dosya okunamadı", exception);
         }
+    }
+
+    /** Sayfa numarasi ve o sayfanin metni. PDF baytlarini gonderemeyen istemciler icin.
+     *  pdf.PageText ile karistirilmasin: bu disaridan gelen ham girdi, o cikarilmis geometri. */
+    public record PageInput(int page, String text) {}
+
+    // Metin girisinde PDF boyut tavani anlamsiz; yerine karakter tavani koyuyoruz.
+    private static final int MAX_TEXT_CHARS = 400_000;
+    private static final Pattern PAGE_MARKER = Pattern.compile("\\[REPORT PAGE (\\d+)]");
+
+    /** ChatGPT gibi istemciler dosyanin baytlarini degil, okunmus metnini gonderebiliyor. Metin
+     *  PDF'ten cikarilmis gibi ayni sayfa isaretleriyle kuruluyor ki sayfa atiflari bozulmasin.
+     *  Bayt olmadigi icin kanit konumu (anchors) ve sayfa metni uretilmez. */
+    public AuditResponse auditText(String documentText, List<PageInput> pages, String language, String documentType) {
+        String text = pages == null || pages.isEmpty() ? withMarkers(documentText) : join(pages);
+        if (text == null || text.trim().length() < 40) {
+            throw new InvalidDocumentException("Belge metni bulunamadı");
+        }
+        if (text.length() > MAX_TEXT_CHARS) {
+            throw new InvalidDocumentException("Belge metni izin verilen boyutu aşıyor");
+        }
+        int total = countPages(text);
+        return llmClient.audit(text, List.of(), language, documentType, false, total, total);
+    }
+
+    /** Sayfa isareti yoksa metnin tamami tek sayfa sayilir; atif uretimi yine calisir. */
+    private String withMarkers(String documentText) {
+        if (documentText == null || documentText.isBlank()) {
+            return null;
+        }
+        return PAGE_MARKER.matcher(documentText).find()
+                ? documentText.trim()
+                : "[REPORT PAGE 1]\n" + documentText.trim();
+    }
+
+    private String join(List<PageInput> pages) {
+        StringBuilder builder = new StringBuilder();
+        pages.stream()
+                .filter(page -> page != null && page.text() != null && !page.text().isBlank())
+                .sorted(Comparator.comparingInt(PageInput::page))
+                .forEach(page -> builder.append("\n\n[REPORT PAGE ")
+                        .append(Math.max(1, page.page()))
+                        .append("]\n")
+                        .append(page.text().trim()));
+        return builder.toString().trim();
+    }
+
+    private int countPages(String text) {
+        Matcher matcher = PAGE_MARKER.matcher(text);
+        int max = 0;
+        while (matcher.find()) {
+            max = Math.max(max, Integer.parseInt(matcher.group(1)));
+        }
+        return Math.max(1, max);
     }
 
     public AuditResponse audit(String filename, byte[] content) {
