@@ -58,4 +58,36 @@ class EvidenceLocatorTest {
         // Kısa parça sayfada rastgele yerlere denk gelir; birebir arama için en az 12 karakter istenir.
         assertThat(EvidenceLocator.locateLiteral("as is", VEHICLE_PAGE)).isEmpty();
     }
+
+    /** İki sütunlu denetçi raporu: satırlar yatay okunduğu için sağ sütun sola karışıyor,
+     *  cümle kesintisiz geçmiyor. Alıntı yine de kendi bloğunda bulunmalı. */
+    private static final PageText TWO_COLUMN_PAGE = new PageText(3, List.of(
+            line("Kilit Denetim Konusu Denetimde Konunun Nasıl Ele Alındığı", 0.2000),
+            line("2.1 numaralı dipnotta açıklandığı üzere, Grup'un Uygulanan denetim prosedürleri aşağıda", 0.2200),
+            line("fonksiyonel para biriminin 31 Aralık 2024 tarihi açıklanmıştır;", 0.2400),
+            line("itibari ile yüksek enflasyonlu ekonomi para birimi", 0.2600),
+            line("olarak değerlendirilmesi sebebi ile Grup, \"TMS 29", 0.2800),
+            line("Ticari alacakların tahsil edilebilirliği ayrıca değerlendirilmiştir.", 0.3400)));
+
+    @Test
+    void quoteInterleavedWithTheOtherColumnIsStillFound() {
+        List<AuditResponse.Rect> rects = EvidenceLocator.locateLiteral(
+                "2.1 numaralı dipnotta açıklandığı üzere, Grup'un fonksiyonel para biriminin "
+                        + "31 Aralık 2024 tarihi itibari ile yüksek enflasyonlu ekonomi para birimi olarak "
+                        + "değerlendirilmesi sebebi ile Grup, \"TMS 29 Yüksek Enflasyonlu Ekonomilerde "
+                        + "Finansal Raporlama\" standardını uygulamaya devam etmektedir.",
+                TWO_COLUMN_PAGE);
+        assertThat(rects).isNotEmpty();
+        // Blok 0.22 ile 0.28 arasında; alakasız son satır (0.34) kapsanmamalı.
+        assertThat(rects.get(0).y()).isEqualTo(0.2200);
+        assertThat(rects.get(0).y() + rects.get(0).h()).isLessThan(0.3400);
+    }
+
+    @Test
+    void oneAccidentalFragmentIsNotEnough() {
+        // Tek parça tutturan alıntı rastlantı olabilir; en az iki satır gerekir.
+        assertThat(EvidenceLocator.locateLiteral(
+                "Ticari alacakların tahsil edilebilirliği hakkında ayrı bir görüş verilmemiştir.",
+                TWO_COLUMN_PAGE)).isEmpty();
+    }
 }

@@ -79,9 +79,22 @@ function literalSpan(quote, pl) {
     joined += t;
   });
   const at = joined.indexOf(needle);
-  if (at < 0) return null;
-  const end = Math.min(lineOf.length - 1, at + needle.length - 1);
-  return { from: lineOf[at], to: lineOf[end] };
+  if (at >= 0) {
+    const end = Math.min(lineOf.length - 1, at + needle.length - 1);
+    return { from: lineOf[at], to: lineOf[end] };
+  }
+  // İki sütunlu sayfada satırlar karışır, cümle kesintisiz geçmez; beşer kelimelik parçalar aranır.
+  const words = needle.split(' ');
+  const hit = [];
+  for (let s = 0; s + 5 <= words.length; s += 2) {
+    const win = words.slice(s, s + 5).join(' ');
+    if (win.length < 20) continue;
+    const i = pl.findIndex((l) => flatten(l.text).includes(win));
+    if (i >= 0 && !hit.includes(i)) hit.push(i);
+  }
+  if (hit.length < 2) return null;
+  hit.sort((a, b) => a - b);
+  return { from: hit[0], to: hit[hit.length - 1] };
 }
 
 function checkAnchors(result, lines, f, note) {

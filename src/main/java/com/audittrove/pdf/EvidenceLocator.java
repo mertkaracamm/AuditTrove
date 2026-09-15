@@ -4,6 +4,7 @@ import com.audittrove.api.AuditResponse;
 import com.audittrove.financial.NumberText;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -132,11 +133,39 @@ public final class EvidenceLocator {
             joined.append(text);
         }
         int at = joined.indexOf(needle);
-        if (at < 0) return List.of();
+        if (at < 0) return merge(byFragments(needle, lines), lines);
         int end = Math.min(lineOf.size() - 1, at + needle.length() - 1);
         List<Integer> chosen = new ArrayList<>();
         for (int i = lineOf.get(at); i <= lineOf.get(end); i++) chosen.add(i);
         return merge(chosen, lines);
+    }
+
+    // Iki sutunlu sayfalarda (denetci raporlari boyle) satirlar yatay okunur, iki sutun ayni satira
+    // karisir; cumle butun olarak gecmez. Ama bes kelimelik parcalari kendi satirlarinda kesintisiz
+    // durur, o yuzden alinti parca parca aranir.
+    private static final int FRAGMENT_WORDS = 5;
+    private static final int FRAGMENT_STEP = 2;
+    private static final int FRAGMENT_MIN_CHARS = 20;
+
+    private static List<Integer> byFragments(String needle, List<PageText.Line> lines) {
+        String[] words = needle.split(" ");
+        if (words.length < FRAGMENT_WORDS) return List.of();
+        List<String> flat = new ArrayList<>(lines.size());
+        for (PageText.Line line : lines) flat.add(normalize(line.text()));
+        Set<Integer> hit = new LinkedHashSet<>();
+        for (int start = 0; start + FRAGMENT_WORDS <= words.length; start += FRAGMENT_STEP) {
+            StringBuilder window = new StringBuilder(words[start]);
+            for (int k = 1; k < FRAGMENT_WORDS; k++) window.append(' ').append(words[start + k]);
+            if (window.length() < FRAGMENT_MIN_CHARS) continue;
+            for (int i = 0; i < flat.size(); i++) {
+                if (flat.get(i).contains(window)) { hit.add(i); break; }
+            }
+        }
+        // Tek parca rastlanti olabilir; en az iki ayri satir tutmali.
+        if (hit.size() < 2) return List.of();
+        List<Integer> chosen = new ArrayList<>(hit);
+        Collections.sort(chosen);
+        return chosen.size() > MAX_LINES ? chosen.subList(0, MAX_LINES) : chosen;
     }
 
     /** Karşılaştırma için sadeleştirme: boşluklar teke iner, tırnak çeşitleri düzleşir, küçük harfe geçer. */
