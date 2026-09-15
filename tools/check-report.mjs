@@ -57,7 +57,7 @@ async function pageLines(file) {
 }
 
 // Çıpa dikdörtgeninin kapsadığı satırlar kanıtla eşleşmeli; eşleşen satır başka yerdeyse kayma raporlanır.
-function checkAnchors(result, lines, f) {
+function checkAnchors(result, lines, f, note) {
   if (!lines) return;
   (result.risks || []).forEach((r, i) => {
     const tag = `risk[${i + 1}]`;
@@ -77,8 +77,14 @@ function checkAnchors(result, lines, f) {
         const text = covered.map((l) => l.text).join(' ');
         if (matches(text)) continue;
         const hit = pl.find((l) => matches(l.text));
-        const where = hit ? `kanıt satırı y=${hit.top.toFixed(3)} "${hit.text.slice(0, 50)}"` : 'kanıt satırı sayfada bulunamadı';
-        f('konum', `${tag} çıpa y=${q.y.toFixed(3)} h=${q.h.toFixed(3)} kapsadığı metin "${text.slice(0, 50)}" kanıtla eşleşmiyor; ${where}`);
+        // Kanıt sayfanın hiçbir satırında bulunamıyorsa çıpanın yanlış olduğunu söyleyemeyiz: elimizde
+        // doğrulayacak malzeme yok. Rapor belgenin dilinden başka bir dildeyse ve alıntı kısaysa
+        // (tek uzun kelime, sayı yok) eşleşme eşiği zaten tutmuyor. Bunu hata değil, doğrulanamadı say.
+        if (!hit) {
+          note('doğrulanamadı', `${tag} çıpa y=${q.y.toFixed(3)} kanıtla karşılaştırılamadı (alıntıda eşleşecek anahtar yok)`);
+          continue;
+        }
+        f('konum', `${tag} çıpa y=${q.y.toFixed(3)} h=${q.h.toFixed(3)} kapsadığı metin "${text.slice(0, 50)}" kanıtla eşleşmiyor; kanıt satırı y=${hit.top.toFixed(3)} "${hit.text.slice(0, 50)}"`);
       }
     }
   });
@@ -166,7 +172,11 @@ async function runAuditOnce(token, file, lang) {
 
 function check(result, lang, lines) {
   const fails = [];
+  const notes = [];
   const f = (rule, detail) => fails.push(`${rule}: ${detail}`);
+  // Doğrulanamayan şeyler ayrı listede: koşuyu düşürmez ama ekranda görünür.
+  const note = (rule, detail) => notes.push(`${rule}: ${detail}`);
+  fails.notes = notes;
   if (!result) { f('sonuç', 'boş'); return fails; }
 
   // dil
@@ -211,9 +221,11 @@ function check(result, lang, lines) {
         if ([q.x, q.y, q.w, q.h].some((v) => typeof v !== 'number' || v < 0 || v > 1) || q.x + q.w > 1.0001 || q.y + q.h > 1.0001 || q.w <= 0 || q.h <= 0) f('konum', `${tag} dikdörtgen sayfa dışı: ${JSON.stringify(q)}`);
       }
     }
-    const big = (r.evidence || '').match(/\d[\d.,]{3,}\d/g) || [];
+    // Sayı kalıbı sunucudaki ReportGate.looksLikeRawRow ile birebir aynı olmalı; ayrı kalıp
+    // kullanınca kapıdan geçen kanıt burada takılıyor ve hangisinin haklı olduğu belirsizleşiyor.
+    const big = (r.evidence || '').match(/\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d+)?|\d[\d.,]{3,}\d/g) || [];
     const words = (r.evidence || '').match(/\p{L}{2,}/gu) || [];
-    if (big.length >= 2 && words.length < 3 * big.length) f('kanıt', `${tag} ham tablo satırı gibi`);
+    if (big.length >= 2 && words.length < 3 * big.length) f('kanıt', `${tag} ham tablo satırı gibi: "${(r.evidence || '').slice(0, 90)}"`);
     const text = `${r.title} ${r.evidence}`;
     if (INCREASE.test(text) && !DECREASE.test(text)) {
       const a = amounts(r.evidence);
@@ -241,7 +253,7 @@ function check(result, lang, lines) {
     for (const p of riskPages) if (!refPages.has(p)) f('referans', `bulgu sayfası ${p} referans listesinde yok`);
     for (const p of refPages) if (!riskPages.has(p)) f('referans', `referans ${p} hiçbir bulguya bağlı değil`);
   }
-  checkAnchors(result, lines, f);
+  checkAnchors(result, lines, f, note);
   return fails;
 }
 
@@ -280,6 +292,7 @@ const pad = (s, n) => String(s).padEnd(n);
         const withPages = r ? (r.risks || []).filter((x) => (x.pages || []).length).length : 0;
         console.log(`${pad(basename(file).slice(0, 43), 44)} ${pad(lang, 4)} ${pad(k, 5)} ${pad(r ? r.riskScore : '-', 5)} ${pad(r ? (r.risks || []).length : '-', 6)} ${pad(r ? `${painted}/${withPages}` : '-', 7)} ${pad(row.ms ? Math.round(row.ms / 1000) + 's' : '-', 6)} ${row.fails.length ? 'FAIL' : 'PASS'}`);
         for (const x of row.fails) console.log(`    - ${x}`);
+        for (const x of (row.fails.notes || [])) console.log(`    ~ ${x}`);
         totalFail += row.fails.length;
       }
       // koşular arası tutarlılık

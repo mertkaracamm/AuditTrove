@@ -41,7 +41,8 @@ public final class EvidenceLocator {
                 if (page == null) continue;
                 // Önce belgeden kelimesi kelimesine alıntı (belgenin dilinde, çeviriden etkilenmez),
                 // sonra kanıt cümlesi, en son bulgu metni.
-                List<AuditResponse.Rect> rects = locate(risk.quote(), page);
+                List<AuditResponse.Rect> rects = locateLiteral(risk.quote(), page);
+                if (rects.isEmpty()) rects = locate(risk.quote(), page);
                 if (rects.isEmpty()) rects = locate(risk.evidence(), page);
                 if (rects.isEmpty()) rects = locate(risk.finding(), page);
                 anchors.add(new AuditResponse.Anchor(p, rects));
@@ -109,6 +110,43 @@ public final class EvidenceLocator {
         }
         List<Integer> chosen = anyNumber ? byNumbers(numberHits, wordHits, lines) : byWords(wordsPerLine, words.size());
         return merge(chosen, lines);
+    }
+
+    // Alıntı belgeden kelimesi kelimesine alındığı için önce birebir aranır. Satır sonuna denk gelen
+    // alıntı ("... sold \"as / is\".") kelime sayımıyla tutturulamıyordu; birebir arama satırları
+    // birleştirip baktığı için bölünmeden etkilenmez ve rapor dili ne olursa olsun aynı yeri bulur.
+    private static final int LITERAL_MIN_CHARS = 12;
+
+    static List<AuditResponse.Rect> locateLiteral(String quote, PageText page) {
+        if (quote == null || page == null || page.lines().isEmpty()) return List.of();
+        String needle = normalize(quote);
+        if (needle.length() < LITERAL_MIN_CHARS) return List.of();
+        List<PageText.Line> lines = page.lines();
+        StringBuilder joined = new StringBuilder();
+        List<Integer> lineOf = new ArrayList<>();
+        for (int i = 0; i < lines.size(); i++) {
+            String text = normalize(lines.get(i).text());
+            if (text.isEmpty()) continue;
+            if (joined.length() > 0) { joined.append(' '); lineOf.add(i); }
+            for (int c = 0; c < text.length(); c++) lineOf.add(i);
+            joined.append(text);
+        }
+        int at = joined.indexOf(needle);
+        if (at < 0) return List.of();
+        int end = Math.min(lineOf.size() - 1, at + needle.length() - 1);
+        List<Integer> chosen = new ArrayList<>();
+        for (int i = lineOf.get(at); i <= lineOf.get(end); i++) chosen.add(i);
+        return merge(chosen, lines);
+    }
+
+    /** Karşılaştırma için sadeleştirme: boşluklar teke iner, tırnak çeşitleri düzleşir, küçük harfe geçer. */
+    private static String normalize(String text) {
+        if (text == null) return "";
+        String flat = text.replace('\u2018', '\'').replace('\u2019', '\'')
+                .replace('\u201c', '"').replace('\u201d', '"')
+                .replace('\u2013', '-').replace('\u2014', '-')
+                .replace('\u00a0', ' ');
+        return flat.replaceAll("\\s+", " ").trim().toLowerCase(TR);
     }
 
     // Sayı eşleşen satırlar: en çok sayı, sonra en çok kelime eşleşeni önde; en fazla MAX_LINES satır.

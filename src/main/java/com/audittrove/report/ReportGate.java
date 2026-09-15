@@ -15,7 +15,10 @@ public final class ReportGate {
     private ReportGate() {}
 
     // Sayı: binlik ayracı nokta/virgül ya da boşluk olabilir ("28.984.491", "18 420,6"); ikisi de tek sayıdır.
-    private static final Pattern BIG_NUMBER = Pattern.compile("\\d(?:[\\d.,]|[ \\u00a0](?=\\d{3}(?!\\d)))*[\\d.,]{3,}\\d");
+    // Boşluklu biçim ayrı yazılır: tek kalıpta boşluk ayracı "402.5 612.1" gibi yan yana iki sayıyı
+    // birleştirip tek sayı sayıyordu, ham tablo satırı kapısı da bu yüzden açılmıyordu.
+    private static final Pattern BIG_NUMBER = Pattern.compile(
+            "\\d{1,3}(?:[ \\u00a0]\\d{3})+(?:[.,]\\d+)?|\\d[\\d.,]{3,}\\d");
     private static final Pattern WORD = Pattern.compile("\\p{L}{2,}");
     // "594,995,138 thousand TL", "%80", "80 %", "EUR 84,000", "£1,250", "12 ay" → sayı kısmı + birim.
     // Önde para birimi kodu/simgesi ya da yüzde, arkada birim metni olabilir; ikisi birden de gelir ("EUR 84,000 gross").

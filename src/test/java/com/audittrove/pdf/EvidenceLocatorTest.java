@@ -4,132 +4,58 @@ import com.audittrove.api.AuditResponse;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Kanıt → sayfa üzerindeki satırlar. PDF'siz: satırlar ve kutuları elle verilir, kural test edilir. */
+/** Alıntının belge üzerindeki yeri: satır sonuna denk gelse de bulunmalı, rapor dilinden etkilenmemeli. */
 class EvidenceLocatorTest {
 
-    private static PageText.Line line(String text, int row) {
-        return new PageText.Line(text, new AuditResponse.Rect(0.1, 0.1 + row * 0.02, 0.8, 0.015));
+    private static PageText.Line line(String text, double y) {
+        return new PageText.Line(text, new AuditResponse.Rect(0.0857, y, 0.8295, 0.0063));
     }
 
-    private static final PageText STATEMENT = new PageText(13, List.of(
-            line("Kar veya Zarar Tablosu", 0),
-            line("Hasılat 18 594.995.138 594.705.176", 1),
-            line("Genel Yönetim Giderleri 19 -8.799.018 -9.282.832", 2),
-            line("ESAS FAALİYET KARI (ZARARI) 28.984.491 63.551.075", 3),
-            line("Finansman Giderleri 23 -35.349.681 -43.205.414", 4),
-            line("DÖNEM KARI (ZARARI) 38.863.566 70.826.085", 5)));
-
-    private static final PageText CONTRACT = new PageText(1, List.of(
-            line("Madde 3 - Kira bedeli. Aylık kira bedeli 42.500 TL olup her ayın 5'ine kadar peşin", 0),
-            line("ödenir. Yıllık artış, TÜİK tarafından açıklanan on iki aylık TÜFE ortalaması oranında", 1),
-            line("uygulanır.", 2),
-            line("Madde 4 - Depozito. Kiracı 2 (iki) aylık kira bedeli tutarında, 85.000 TL depozito verir.", 3),
-            line("Madde 5 - Gecikme. Kira bedelinin geç ödenmesi halinde geciken her gün için aylık", 4),
-            line("kiranın %0,5'i oranında gecikme bedeli uygulanır. İki ay üst üste ödeme yapılmaması", 5),
-            line("halinde kiraya veren sözleşmeyi tek taraflı feshedebilir.", 6),
-            line("Madde 6 - Giderler. Aidat, elektrik, su, doğalgaz ve internet giderleri kiracıya aittir.", 7)));
+    /** Araç satış sözleşmesi: alıntı iki satıra bölünmüş ("... sold \"as" / "is\"."). */
+    private static final PageText VEHICLE_PAGE = new PageText(1, List.of(
+            line("Clause 2 - Condition of the Vehicle", 0.3900),
+            line("2.1. The buyer accepts the vehicle as seen, inspected and test driven. The vehicle is sold \"as", 0.4059),
+            line("is\".", 0.4338),
+            line("2.2. The seller gives no undertaking as to the accuracy of the recorded mileage.", 0.4775)));
 
     @Test
-    void numbersInEvidenceSelectTheStatementRowWhateverTheFormat() {
-        var rects = EvidenceLocator.locate("Operating profit fell from 63,551,075 thousand TL to 28,984,491 thousand TL, a 54.4% decrease.", STATEMENT);
+    void quoteSplitAcrossTwoLinesIsFound() {
+        List<AuditResponse.Rect> rects = EvidenceLocator.locateLiteral(
+                "The vehicle is sold \"as is\".", VEHICLE_PAGE);
         assertThat(rects).hasSize(1);
-        assertThat(rects.get(0).y()).isCloseTo(0.16, org.assertj.core.data.Offset.offset(1e-9));
+        // İki satır birleşerek tek kutu olur: üstte 2.1 satırı, altta devamı.
+        assertThat(rects.get(0).y()).isEqualTo(0.4059);
+        assertThat(rects.get(0).y() + rects.get(0).h()).isGreaterThan(0.4338);
     }
 
     @Test
-    void wordsSelectTheParagraphAndTrimTheNeighbour() {
-        var rects = EvidenceLocator.locate(
-                "Sözleşme, kira bedelinin geç ödenmesi halinde her gün için aylık kiranın %0,5'i oranında gecikme bedeli öngörür.", CONTRACT);
-        // %0,5 yüzde çıpası + kelimeler: Madde 5'in üç satırı tek dikdörtgen; Madde 4 ve 6 dışarıda.
+    void quoteIsFoundWhateverTheReportLanguage() {
+        // Alıntı belgenin dilinde kalır; Türkçe rapor da aynı yeri göstermeli.
+        List<AuditResponse.Rect> rects = EvidenceLocator.locateLiteral(
+                "the vehicle is sold \"as is\"", VEHICLE_PAGE);
         assertThat(rects).hasSize(1);
-        assertThat(rects.get(0).y()).isCloseTo(0.18, org.assertj.core.data.Offset.offset(1e-9));
-        assertThat(rects.get(0).h()).isCloseTo(0.055, org.assertj.core.data.Offset.offset(1e-9));
+        assertThat(rects.get(0).y()).isEqualTo(0.4059);
     }
 
     @Test
-    void tableNeighboursAreNotPulledIntoTheHighlight() {
-        // Komşu satırlar aynı kelimeleri taşısa da ("Esas Faaliyet...") sayı dolu tablo satırıdır, boyanmaz.
-        var rects = EvidenceLocator.locate("Esas faaliyet kârı 63.551.075'ten 28.984.491'e geriledi.", new PageText(13, List.of(
-                line("Esas Faaliyetlerden Diğer Gelirler 21 12.818.008 22.889.377", 0),
-                line("Esas Faaliyetlerden Diğer Giderler 21 -12.989.018 -12.246.901", 1),
-                line("ESAS FAALİYET KARI (ZARARI) 28.984.491 63.551.075", 2),
-                line("Yatırım Faaliyetlerinden Gelirler 30 6.934.094 4.149.642", 3))));
-        assertThat(rects).hasSize(1);
-        assertThat(rects.get(0).h()).isCloseTo(0.015, org.assertj.core.data.Offset.offset(1e-9));
+    void curlyQuotesAndDoubleSpacesDoNotBreakTheMatch() {
+        List<AuditResponse.Rect> rects = EvidenceLocator.locateLiteral(
+                "The  vehicle is sold “as is”.", VEHICLE_PAGE);
+        assertThat(rects).isNotEmpty();
     }
 
     @Test
-    void chartLabelsRepeatingASingleNumberAreNotPainted() {
-        // Sunum sayfası: tablo satırında iki sayı birlikte, grafikte aynı sayılar tek tek etiket.
-        var slide = new PageText(14, List.of(
-                line("ÖZET NET BORÇ / FAVÖK", 0),
-                line("Hazır Değerler 101.048 95.773", 1),
-                line("Net Borç 16.383 48.827", 2),
-                line("16.383", 3),
-                line("48.827", 4),
-                line("Net Borç Net Borç/FAVÖK 0,42x", 5)));
-        var rects = EvidenceLocator.locate("Net debt rose from 16,383 to 48,827 million TL.", slide);
-        assertThat(rects).hasSize(1);
-        assertThat(rects.get(0).y()).isCloseTo(0.14, org.assertj.core.data.Offset.offset(1e-9));
+    void quoteThatIsNotOnThePageFindsNothing() {
+        assertThat(EvidenceLocator.locateLiteral(
+                "The seller provides a twelve month warranty.", VEHICLE_PAGE)).isEmpty();
     }
 
     @Test
-    void aLonelySingleWordHeadingDoesNotRescueAWeakMatch() {
-        // Bilanço sayfası: kanıt aslında başka sayfada; "assets" başlığı + "trade receivables" satırları eşiğe zar zor ulaşırdı.
-        var sheet = new PageText(11, List.of(
-                line("Assets [abstract]", 0),
-                line("CURRENT ASSETS", 1),
-                line("Cash and cash equivalents 4 22.330.114 21.980.984", 2),
-                line("Trade Receivables 68.226.515 65.821.936", 3),
-                line("Trade Receivables Due From Related Parties 27 44.379.203 36.466.844", 4),
-                line("Inventories 9 39.938.955 42.378.541", 5)));
-        var rects = EvidenceLocator.locate("The auditor's report contains an emphasis of matter paragraph titled 'Key Audit Matters' discussing inflation accounting, trade receivables recoverability, cash flow hedge accounting, and deferred tax assets from investment incentives.", sheet);
-        assertThat(rects).isEmpty();
-    }
-
-    @Test
-    void unrelatedEvidenceIsNotPainted() {
-        assertThat(EvidenceLocator.locate("The auditor expressed an unqualified opinion on the consolidated statements.", CONTRACT)).isEmpty();
-        assertThat(EvidenceLocator.locate("", CONTRACT)).isEmpty();
-    }
-
-    @Test
-    void crossLanguageEvidenceStillAnchorsOnNumbers() {
-        var rects = EvidenceLocator.locate("Faaliyet kârı 63.551.075'ten 28.984.491'e geriledi.", STATEMENT);
-        assertThat(rects).hasSize(1);
-    }
-
-    @Test
-    void extraObservationOnTheSameLinesAsACountedFindingIsDropped() {
-        var risks = List.of(
-                new AuditResponse.Risk("Delay penalty", "MEDIUM", "f", "Late payment incurs 0.5% per day.", List.of(1), AuditResponse.Risk.RUBRIC, "kiranın %0,5'i oranında gecikme bedeli"),
-                new AuditResponse.Risk("Daily late fee", "MEDIUM", "f", "A daily fee of %0,5 applies when rent is late.", List.of(1), AuditResponse.Risk.MODEL, "gecikme bedeli uygulanır"),
-                new AuditResponse.Risk("Utilities on tenant", "LOW", "f", "Aidat, elektrik, su ve internet giderleri kiracıya aittir.", List.of(1), AuditResponse.Risk.MODEL, "giderleri kiracıya aittir"));
-        var r = new AuditResponse(60, "", "", risks, List.of(), List.of(), List.of(), List.of(), "en", 1);
-        var out = EvidenceLocator.annotate(r, Map.of(1, CONTRACT));
-        // Aynı satırlardaki ek gözlem düşer; başka satırdaki ek gözlem kalır.
-        assertThat(out.risks()).hasSize(2);
-        assertThat(out.risks().get(1).title()).isEqualTo("Utilities on tenant");
-    }
-
-    @Test
-    void annotateAddsAnchorsPerPageAndKeepsRisksWithoutPages() {
-        var risks = List.of(
-                new AuditResponse.Risk("Decline", "MEDIUM", "f", "Operating profit fell from 63,551,075 to 28,984,491.", List.of(13), AuditResponse.Risk.ENGINE),
-                new AuditResponse.Risk("Note", "LOW", "f", "no pages", List.of(), AuditResponse.Risk.MODEL),
-                new AuditResponse.Risk("Missing", "LOW", "f", "Something the page does not say at all here.", List.of(13), AuditResponse.Risk.RUBRIC));
-        var r = new AuditResponse(60, "", "", risks, List.of(), List.of(), List.of(), List.of(), "en", 20);
-        var out = EvidenceLocator.annotate(r, Map.of(13, STATEMENT));
-        assertThat(out.risks().get(0).anchors()).hasSize(1);
-        assertThat(out.risks().get(0).anchors().get(0).page()).isEqualTo(13);
-        assertThat(out.risks().get(0).anchors().get(0).rects()).hasSize(1);
-        assertThat(out.risks().get(1).anchors()).isEmpty();
-        // Sayfa var ama satır bulunamadı: çıpa sayfayı taşır, dikdörtgen boş (arayüz kenar şeridi gösterir).
-        assertThat(out.risks().get(2).anchors()).hasSize(1);
-        assertThat(out.risks().get(2).anchors().get(0).rects()).isEmpty();
+    void tooShortQuoteIsNotSearchedLiterally() {
+        // Kısa parça sayfada rastgele yerlere denk gelir; birebir arama için en az 12 karakter istenir.
+        assertThat(EvidenceLocator.locateLiteral("as is", VEHICLE_PAGE)).isEmpty();
     }
 }
