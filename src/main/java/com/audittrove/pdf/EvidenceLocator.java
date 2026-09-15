@@ -115,12 +115,10 @@ public final class EvidenceLocator {
     // Alıntı belgeden kelimesi kelimesine alındığı için önce birebir aranır. Satır sonuna denk gelen
     // alıntı ("... sold \"as / is\".") kelime sayımıyla tutturulamıyordu; birebir arama satırları
     // birleştirip baktığı için bölünmeden etkilenmez ve rapor dili ne olursa olsun aynı yeri bulur.
-    private static final int LITERAL_MIN_CHARS = 12;
-
     static List<AuditResponse.Rect> locateLiteral(String quote, PageText page) {
         if (quote == null || page == null || page.lines().isEmpty()) return List.of();
         String needle = normalize(quote);
-        if (needle.length() < LITERAL_MIN_CHARS) return List.of();
+        if (!com.audittrove.report.QuoteMatch.searchable(needle)) return List.of();
         List<PageText.Line> lines = page.lines();
         StringBuilder joined = new StringBuilder();
         List<Integer> lineOf = new ArrayList<>();
@@ -142,39 +140,26 @@ public final class EvidenceLocator {
     // Iki sutunlu sayfalarda (denetci raporlari boyle) satirlar yatay okunur, iki sutun ayni satira
     // karisir; cumle butun olarak gecmez. Ama bes kelimelik parcalari kendi satirlarinda kesintisiz
     // durur, o yuzden alinti parca parca aranir.
-    private static final int FRAGMENT_WORDS = 5;
-    private static final int FRAGMENT_STEP = 2;
-    private static final int FRAGMENT_MIN_CHARS = 20;
-
     private static List<Integer> byFragments(String needle, List<PageText.Line> lines) {
-        String[] words = needle.split(" ");
-        if (words.length < FRAGMENT_WORDS) return List.of();
+        List<String> windows = com.audittrove.report.QuoteMatch.windows(needle);
+        if (windows.isEmpty()) return List.of();
         List<String> flat = new ArrayList<>(lines.size());
         for (PageText.Line line : lines) flat.add(normalize(line.text()));
         Set<Integer> hit = new LinkedHashSet<>();
-        for (int start = 0; start + FRAGMENT_WORDS <= words.length; start += FRAGMENT_STEP) {
-            StringBuilder window = new StringBuilder(words[start]);
-            for (int k = 1; k < FRAGMENT_WORDS; k++) window.append(' ').append(words[start + k]);
-            if (window.length() < FRAGMENT_MIN_CHARS) continue;
+        for (String window : windows) {
             for (int i = 0; i < flat.size(); i++) {
                 if (flat.get(i).contains(window)) { hit.add(i); break; }
             }
         }
         // Tek parca rastlanti olabilir; en az iki ayri satir tutmali.
-        if (hit.size() < 2) return List.of();
+        if (hit.size() < com.audittrove.report.QuoteMatch.minWindowHits()) return List.of();
         List<Integer> chosen = new ArrayList<>(hit);
         Collections.sort(chosen);
         return chosen.size() > MAX_LINES ? chosen.subList(0, MAX_LINES) : chosen;
     }
 
-    /** Karşılaştırma için sadeleştirme: boşluklar teke iner, tırnak çeşitleri düzleşir, küçük harfe geçer. */
     private static String normalize(String text) {
-        if (text == null) return "";
-        String flat = text.replace('\u2018', '\'').replace('\u2019', '\'')
-                .replace('\u201c', '"').replace('\u201d', '"')
-                .replace('\u2013', '-').replace('\u2014', '-')
-                .replace('\u00a0', ' ');
-        return flat.replaceAll("\\s+", " ").trim().toLowerCase(TR);
+        return com.audittrove.report.QuoteMatch.flatten(text);
     }
 
     // Sayı eşleşen satırlar: en çok sayı, sonra en çok kelime eşleşeni önde; en fazla MAX_LINES satır.

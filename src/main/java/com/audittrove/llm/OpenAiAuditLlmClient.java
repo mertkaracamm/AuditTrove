@@ -10,6 +10,7 @@ import com.audittrove.financial.StatementVerifier;
 import com.audittrove.rag.RegulationChunk;
 import com.audittrove.report.LanguageCheck;
 import com.audittrove.report.PageRefs;
+import com.audittrove.report.QuoteMatch;
 import com.audittrove.report.ReportGate;
 import com.audittrove.report.RubricItem;
 import com.audittrove.report.SummaryGate;
@@ -1147,7 +1148,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             }
             PageRefs.Parsed ev = PageRefs.strip(risk.evidence());
             PageRefs.Parsed fi = PageRefs.strip(risk.finding());
-            List<Integer> found = groundPages(ev.text(), pages);
+            // Alıntı belgeden kelimesi kelimesine alındığı için sayfayı en iyi o söyler. Modelin
+            // bildirdiği sayfa uzun raporlarda şaşıyor; bulgu o zaman yanlış sayfaya bağlanıyor ve
+            // belge üzerinde işaretlenemiyordu.
+            List<Integer> found = pagesOfQuote(risk.quote(), pages);
+            if (found.isEmpty()) {
+                found = groundPages(ev.text(), pages);
+            }
             if (found.isEmpty()) {
                 // Sayıdan sayfa bulunamadı: modelin yazdığı ya da motorun koyduğu atıfa güven,
                 // ama yalnızca belgede gerçekten var olan sayfalar kabul edilir.
@@ -1668,6 +1675,19 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
     // Kanıttaki sayıları sayfalarda arar. Karşılaştırma rakam dizisi üzerinden yapılır; "24.833.723"
     // ile "24,833,723" aynı sayıdır, rapor dili belge dilinden farklı olsa da eşleşir.
+    /** Alıntının geçtiği sayfalar. Birden fazla sayfada geçiyorsa (tekrar eden madde) hiçbiri
+     *  seçilmez; o zaman sayı temelli bulmaya düşülür. */
+    private List<Integer> pagesOfQuote(String quote, Map<Integer, String> pages) {
+        if (quote == null || quote.isBlank() || pages.isEmpty()) {
+            return List.of();
+        }
+        List<Integer> hits = new ArrayList<>();
+        for (Map.Entry<Integer, String> page : pages.entrySet()) {
+            if (QuoteMatch.occursIn(quote, page.getValue())) hits.add(page.getKey());
+        }
+        return hits.size() == 1 ? hits : List.of();
+    }
+
     private List<Integer> groundPages(String evidence, Map<Integer, String> pages) {
         if (evidence == null || pages.isEmpty()) {
             return List.of();
