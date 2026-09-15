@@ -102,6 +102,10 @@ public record AuditResponse(
             return MODEL.equals(source);
         }
 
+        public boolean isRubric() {
+            return RUBRIC.equals(source);
+        }
+
         public Risk withAnchors(List<Anchor> anchors) {
             return new Risk(title, severity, finding, evidence, pages, source, quote, anchors);
         }

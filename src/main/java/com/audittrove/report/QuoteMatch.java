@@ -38,6 +38,11 @@ public final class QuoteMatch {
         return flatQuote != null && flatQuote.length() >= MIN_CHARS;
     }
 
+    /** Bu alıntı üzerinden karar verilebilir mi: boş ya da çok kısa alıntı belgede aranamaz. */
+    public static boolean verifiable(String quote) {
+        return searchable(flatten(quote));
+    }
+
     /** Alıntının beşer kelimelik parçaları; kısa olanlar ayırt edici değil, atılır. */
     public static List<String> windows(String flatQuote) {
         List<String> out = new ArrayList<>();

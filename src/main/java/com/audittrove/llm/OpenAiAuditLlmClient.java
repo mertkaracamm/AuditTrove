@@ -1152,6 +1152,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             // bildirdiği sayfa uzun raporlarda şaşıyor; bulgu o zaman yanlış sayfaya bağlanıyor ve
             // belge üzerinde işaretlenemiyordu.
             List<Integer> found = pagesOfQuote(risk.quote(), pages);
+            // Kontrol listesi bulgusunun alıntısı belgenin hiçbir sayfasında geçmiyorsa bulgu rapora
+            // girmez: oylama sınırda kaldığında model belgede olmayan bir cümle yazabiliyor ve aynı
+            // belge iki kez tarandığında bulgu bir çıkıp bir kayboluyordu.
+            if (found.isEmpty() && risk.isRubric() && QuoteMatch.verifiable(risk.quote())) {
+                log.warn("Kontrol listesi alintisi belgede bulunamadi, dusuruldu: {}", risk.title());
+                continue;
+            }
             if (found.isEmpty()) {
                 found = groundPages(ev.text(), pages);
             }

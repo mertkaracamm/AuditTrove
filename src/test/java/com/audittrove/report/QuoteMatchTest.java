@@ -64,6 +64,19 @@ class QuoteMatchTest {
     }
 
     @Test
+    void emptyOrShortQuoteIsNotVerifiable() {
+        // Doğrulanamayan alıntı yüzünden bulgu düşürülmemeli; kural sadece aranabilir alıntılar için işler.
+        assertThat(QuoteMatch.verifiable(null)).isFalse();
+        assertThat(QuoteMatch.verifiable("   ")).isFalse();
+        assertThat(QuoteMatch.verifiable("kur farkı")).isFalse();
+    }
+
+    @Test
+    void aFullSentenceIsVerifiable() {
+        assertThat(QuoteMatch.verifiable("Grup aleyhine açılmış davaların toplam tutarı 412,6 milyon TL'dir.")).isTrue();
+    }
+
+    @Test
     void curlyQuotesAndDoubleSpacesAreNormalised() {
         assertThat(QuoteMatch.flatten("  Grup’un  “kur” farkı ")).isEqualTo("grup'un \"kur\" farkı");
     }
