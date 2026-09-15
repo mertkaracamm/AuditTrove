@@ -798,6 +798,11 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                         yes++;
                         if (first == null) first = a; // kanıt öncelikle birincilden
                     }
+                    // Sınırda kalan madde (eşiği tam tutturan ya da bir oyla kaçıran) loga düşsün;
+                    // aynı belgenin farklı skor almasının kaynağı bu maddeler.
+                    if (!votes.isEmpty() && (yes == needed || yes == needed - 1)) {
+                        log.warn("Kontrol listesi sinirda: {} — {}/{} oy", item.id(), yes, votes.size());
+                    }
                     if (yes >= needed && first != null) { best = first; break; }
                 }
                 if (best == null) continue;
@@ -1748,27 +1753,22 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // Skor iki şeyden türer: en ağır bulgunun seviyesi (bant) ve bulgu sayısının az mı çok mu olduğu
     // (bant içi konum). Bulgu sayısı bire bir puana çevrilmez; LLM'in bir bulgu fazla ya da eksik
     // üretmesi skoru oynatmasın. Çapraz kontrol eklemeleri sayılmaz.
-    private static final int FEW_FINDINGS_MAX = 3;
 
     private int calibrateScore(int ignoredLlmScore, List<AuditResponse.Risk> risks) {
-        int top = 0, count = 0;
+        int top = 0, weight = 0;
         if (risks != null) {
             for (AuditResponse.Risk r : risks) {
                 if (isCrossAddition(r) || r.isModel()) continue; // ek gözlemler skora girmez
                 int rank = severityRank(r.severity());
                 if (rank == 0) continue;
-                count++;
+                // Bulgular sayılmıyor, ağırlıklarıyla toplanıyor. Sayarken tek bir düşük önemli bulgu
+                // eşiği geçirip skoru bir kademe oynatıyordu; modeller sınırdaki maddede fikir
+                // değiştirince aynı belge farklı skor alıyordu.
+                weight += rank;
                 top = Math.max(top, rank);
             }
         }
-        boolean few = count <= FEW_FINDINGS_MAX;
-        return switch (top) {
-            case 4 -> few ? 22 : 12;   // kırmızı — madde madde
-            case 3 -> few ? 47 : 36;   // turuncu — dikkatle
-            case 2 -> few ? 72 : 60;   // sarı — gözden geçir
-            case 1 -> few ? 88 : 82;   // yeşil — küçük notlar
-            default -> 95;             // yeşil — bulgu yok
-        };
+        return com.audittrove.report.ScoreScale.of(top, weight);
     }
 
     // Rapor dili belgenin dilinden bağımsızdır; alıntı bile rapor diline çevrilir, sayılar aynen kalır.
