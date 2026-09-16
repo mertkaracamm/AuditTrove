@@ -802,9 +802,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                         yes++;
                         if (first == null) first = a; // kanıt öncelikle birincilden
                     }
-                    // Sınırda kalan madde (eşiği tam tutturan ya da bir oyla kaçıran) loga düşsün;
-                    // aynı belgenin farklı skor almasının kaynağı bu maddeler.
-                    if (!votes.isEmpty() && (yes == needed || yes == needed - 1)) {
+                    // Birden fazla oy varsa (birincil cevap veremeyip yedeğe düşülen hâl) sınırda kalan
+                    // madde loga düşsün; tek oyda sınır diye bir şey yok, her madde sınırda görünürdü.
+                    if (votes.size() > 1 && (yes == needed || yes == needed - 1)) {
                         log.warn("Kontrol listesi sinirda: {} — {}/{} oy", item.id(), yes, votes.size());
                     }
                     if (yes >= needed && first != null) { best = first; break; }
@@ -829,10 +829,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         RubricUnavailableException(String message, Throwable cause) { super(message, cause); }
     }
 
-    // Bir parça için oylar: ikinciller birincille aynı anda başlar, birincil listenin başında döner.
-    // Birincil cevap veremezse parça oysuz kalır (boş liste).
+    // Kontrol listesi kararını yalnızca birincil model verir. Birincil temperature 0 ve sabit seed ile
+    // çağrıldığı için aynı belge her zaman aynı cevabı alıyor; ikincil modellerin oyu sağlayıcı tarafında
+    // oynadığından sınırda kalan madde koşudan koşuya gelip gidiyordu ve madde yüksek önemliyse skor band
+    // atlıyordu. İkincil modeller çapraz kontrolde ve belge türü oylamasında çalışmaya devam ediyor.
+    // Birincil cevap veremezse parça oysuz kalır (boş liste) ve inceleme hata verir; listesiz rapor
+    // "temiz" görünür, bu yanlış rapordur.
     private List<RubricResult> rubricVotes(String system, Map<String, Object> schema, String chunk) {
-        List<CompletableFuture<RubricResult>> secondary = startRubricSecondaryVotes(system, schema, chunk);
         List<RubricResult> votes = new ArrayList<>();
         try {
             Map<String, Object> body = Map.of(
@@ -848,7 +851,6 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             log.warn("Kontrol listesi birincil cevap alinamadi: {}", e.toString());
             return List.of();
         }
-        votes.addAll(collectRubricSecondaryVotes(secondary));
         return votes;
     }
 
@@ -856,45 +858,6 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         if (r == null || r.answers() == null) return null;
         for (RubricAnswer a : r.answers()) if (RubricItem.fromId(a.id()) == item) return a;
         return null;
-    }
-
-    // İkincil modeller aynı kontrol listesini cevaplamaya hemen başlar; yapılandırılmamışsa boş liste döner.
-    private List<CompletableFuture<RubricResult>> startRubricSecondaryVotes(String system, Map<String, Object> schema, String chunk) {
-        if (!multiModelEnabled) return List.of();
-        List<SecondaryBackend> active = secondaryBackends.stream().filter(SecondaryBackend::configured).toList();
-        if (active.size() < 2) return List.of();
-        String schemaText;
-        try { schemaText = objectMapper.writeValueAsString(schema); } catch (Exception e) { return List.of(); }
-        String sys = system + "\nRespond with ONLY one JSON object (no markdown fences, no commentary) that validates against this JSON Schema:\n" + schemaText;
-        List<CompletableFuture<RubricResult>> futures = new ArrayList<>();
-        for (SecondaryBackend b : active) {
-            futures.add(CompletableFuture.supplyAsync(() -> {
-                try {
-                    String json = extractJsonObject(secondaryCall(b, sys, chunk));
-                    return json.isBlank() ? null : objectMapper.readValue(json, RubricResult.class);
-                } catch (Exception e) {
-                    log.warn("Kontrol listesi oyu {} basarisiz: {}", b.name(), e.toString());
-                    return null;
-                }
-            }, crossCheckExecutor));
-        }
-        return futures;
-    }
-
-    // Oylar skora girdiği için beklenir; süre tavanını aşan oy o turda kullanılmaz.
-    private List<RubricResult> collectRubricSecondaryVotes(List<CompletableFuture<RubricResult>> futures) {
-        if (futures.isEmpty()) return List.of();
-        try {
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(45, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            log.warn("Kontrol listesi oylari zamaninda gelmedi: {}", e.toString());
-        }
-        List<RubricResult> out = new ArrayList<>();
-        for (CompletableFuture<RubricResult> f : futures) {
-            RubricResult r = f.getNow(null);
-            if (r != null) out.add(r);
-        }
-        return out;
     }
 
     private static RubricItem.Kind kindFromDocumentType(String documentType) {
