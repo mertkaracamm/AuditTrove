@@ -140,7 +140,7 @@ function checkAnchors(result, lines, f, note) {
   });
 }
 
-const SCORES = new Set([12, 22, 36, 47, 60, 72, 82, 88, 95]);
+const SCORES = new Set([12, 36, 60, 82, 95]);
 const SEVERITIES = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
 const TR_WORDS = new Set(['ve', 'ile', 'için', 'bir', 'bu', 'olarak', 'olan', 'olup', 'tarihi', 'itibarıyla', 'itibariyle', 'göre', 'ancak', 'veya', 'ise', 'kadar', 'üzere', 'gibi', 'daha']);
 const EN_WORDS = new Set(['the', 'and', 'of', 'to', 'in', 'for', 'with', 'is', 'are', 'by', 'from', 'that', 'as', 'which', 'this', 'or', 'has', 'have', 'not']);
@@ -248,16 +248,12 @@ function check(result, lang, lines) {
   const counted = risks.filter((r) => r.source !== 'model' && !/^(Cross-check:|Çapraz doğrulama:)/.test(r.title || ''));
   const rank = { CRITICAL: 4, HIGH: 3, MEDIUM: 2, LOW: 1 };
   const top = Math.max(0, ...counted.map((r) => rank[r.severity] || 0));
-  // Sunucudaki ScoreScale ile aynı: bulgular sayılmaz, ağırlıkları toplanır. Tek bir düşük önemli
-  // bulgu eşiği geçirmesin diye; iki yerde iki kural olursa hangisinin doğru olduğu belirsizleşir.
-  const weight = counted.reduce((sum, r) => sum + (rank[r.severity] || 0), 0);
-  const light = weight <= 4;
-  // Skora giren bulgu yokken raporda ek gözlem duruyorsa sunucu 95 ("temiz") basmaz, 88 basar.
+  // Sunucudaki ScoreScale ile aynı: skoru yalnızca en ağır bulgu belirler, sayı ve ağırlık girmez.
+  // İki yerde iki kural olursa hangisinin doğru olduğu belirsizleşir.
+  // Skora giren bulgu yokken raporda ek gözlem duruyorsa sunucu 95 ("temiz") basmaz, en alt bandı basar.
   const observation = risks.some((r) => r.source === 'model');
-  const expected = top === 0 && observation
-    ? 88
-    : { 4: light ? 22 : 12, 3: light ? 47 : 36, 2: light ? 72 : 60, 1: light ? 88 : 82, 0: 95 }[top];
-  if (!SCORES.has(result.riskScore)) f('skor', `${result.riskScore} tanımlı 9 değerden değil`);
+  const expected = top === 0 && observation ? 82 : { 4: 12, 3: 36, 2: 60, 1: 82, 0: 95 }[top];
+  if (!SCORES.has(result.riskScore)) f('skor', `${result.riskScore} tanımlı 5 değerden değil`);
   else if (result.riskScore !== expected) f('skor', `${result.riskScore}, bulgulara göre ${expected} olmalıydı`);
 
   // bulgular

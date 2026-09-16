@@ -1778,27 +1778,24 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // üretmesi skoru oynatmasın. Çapraz kontrol eklemeleri sayılmaz.
 
     private int calibrateScore(int ignoredLlmScore, List<AuditResponse.Risk> risks) {
-        int top = 0, weight = 0;
+        int top = 0;
         boolean observation = false;
         if (risks != null) {
             for (AuditResponse.Risk r : risks) {
                 if (r.isModel()) observation = true;
                 if (isCrossAddition(r) || r.isModel()) continue; // ek gözlemler skora girmez
-                int rank = severityRank(r.severity());
-                if (rank == 0) continue;
-                // Bulgular sayılmıyor, ağırlıklarıyla toplanıyor. Sayarken tek bir düşük önemli bulgu
-                // eşiği geçirip skoru bir kademe oynatıyordu; modeller sınırdaki maddede fikir
-                // değiştirince aynı belge farklı skor alıyordu.
-                weight += rank;
-                top = Math.max(top, rank);
+                // Skoru yalnızca en ağır bulgu belirliyor. Bulgu sayısı ya da ağırlık toplamı
+                // hesaba girmiyor: gürültülü bir sayının üstündeki eşik er geç atlanıyor ve aynı
+                // belge farklı skor alıyordu.
+                top = Math.max(top, severityRank(r.severity()));
             }
         }
         // Skora giren bulgu yokken ekranda ek gözlem duruyorsa 95 basmıyoruz: kullanıcı bulguyu
-        // görürken altında "belge temiz" yazıyordu. 88 bandı ("küçük notlar") bu durumu doğru anlatıyor.
+        // görürken altında "belge temiz" yazıyordu. En alt band bu durumu doğru anlatıyor.
         if (top == 0 && observation) {
-            return com.audittrove.report.ScoreScale.of(1, 1);
+            return com.audittrove.report.ScoreScale.of(1);
         }
-        return com.audittrove.report.ScoreScale.of(top, weight);
+        return com.audittrove.report.ScoreScale.of(top);
     }
 
     // Rapor dili belgenin dilinden bağımsızdır; alıntı bile rapor diline çevrilir, sayılar aynen kalır.
