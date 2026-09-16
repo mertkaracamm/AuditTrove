@@ -58,13 +58,13 @@ class RubricItemTest {
     }
 
     @Test
-    void financialDocumentsAreNotAskedContractQuestions() {
-        // Finansal raporda "tek tarafli fesih hakki" bulgusu yanlis duruyordu ve kosudan kosuya
-        // gelip gidiyordu; kredi taahhudu zaten finansal listede sorulu.
+    void financialDocumentsAreAlsoAskedTheGeneralQuestions() {
+        // Rakam yogun bir kredi formu "financial" sanilinca ne finansal ne sozlesme sorusu
+        // tutuyor, rapor sifir bulguyla "temiz" cikiyordu. Hicbir tur bu sorulardan muaf degil.
         List<RubricItem> items = RubricItem.withGeneral(RubricItem.Kind.FINANCIAL,
                 RubricItem.forKind(RubricItem.Kind.FINANCIAL));
         assertThat(items).containsAll(RubricItem.forKind(RubricItem.Kind.FINANCIAL));
-        assertThat(items).doesNotContain(RubricItem.GEN_UNILATERAL_TERMINATION,
-                RubricItem.GEN_BINDING_DEADLINES, RubricItem.GEN_PENALTIES);
+        assertThat(items).containsAll(RubricItem.forKind(RubricItem.Kind.GENERAL));
+        assertThat(items).doesNotHaveDuplicates();
     }
 }

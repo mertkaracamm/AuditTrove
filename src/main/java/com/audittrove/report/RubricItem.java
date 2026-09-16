@@ -260,11 +260,10 @@ public enum RubricItem {
      * sorularını aldığı için içindeki tek taraflı fesih hakkı hiç sorulmadan rapor temiz çıkıyordu.
      */
     public static List<RubricItem> withGeneral(Kind kind, List<RubricItem> items) {
-        // Finansal tabloya sözleşme sorusu sorulmaz: "tek taraflı fesih hakkı" diye bir bulgu
-        // faaliyet raporunda yanlış duruyor, kredi taahhütleri zaten finansal listede sorulu.
-        if (kind == Kind.FINANCIAL) {
-            return items == null ? List.of() : List.copyOf(items);
-        }
+        // Hiçbir tür bu sorulardan muaf değil, finansal tablo dahil. Bir ara "finansal tabloya
+        // sözleşme sorusu sorulmasın" istisnası vardı; rakam yoğun bir kredi formu finansal
+        // sanılınca belgeye ne finansal ne sözleşme sorusu tutuyor, rapor sıfır bulguyla "temiz"
+        // çıkıyordu. Yanlış yere düşen bulgu kullanıcıya görünür, hiç sorulmayan soru görünmez.
         List<RubricItem> out = new ArrayList<>();
         EnumSet<Topic> covered = EnumSet.noneOf(Topic.class);
         if (items != null) {
