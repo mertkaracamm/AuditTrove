@@ -148,17 +148,41 @@ public final class EvidenceLocator {
         if (windows.isEmpty()) return List.of();
         List<String> flat = new ArrayList<>(lines.size());
         for (PageText.Line line : lines) flat.add(normalize(line.text()));
-        Set<Integer> hit = new LinkedHashSet<>();
+        // Her parçanın eşleştiği BÜTÜN satırlar toplanır. Eskiden parça başına sayfadaki ilk eşleşme
+        // alınıyordu; benzer ifade sayfanın iki ayrı yerinde geçince parçalar birbirinden uzak satırlara
+        // dağılıyor ve çıpa cümlenin olmadığı yere oturuyordu.
+        List<Set<Integer>> hitsPerWindow = new ArrayList<>();
         for (String window : windows) {
+            Set<Integer> where = new LinkedHashSet<>();
             for (int i = 0; i < flat.size(); i++) {
-                if (flat.get(i).contains(window)) { hit.add(i); break; }
+                if (flat.get(i).contains(window)) where.add(i);
+            }
+            if (!where.isEmpty()) hitsPerWindow.add(where);
+        }
+        int needed = com.audittrove.report.QuoteMatch.minWindowHits();
+        if (hitsPerWindow.size() < needed) return List.of();
+        // Aynı cümlenin parçaları sayfada birbirine yakın durur. En çok parçayı bir arada tutan
+        // MAX_LINES satırlık pencere seçilir; eşitlikte sayfanın üstündeki kazanır.
+        int bestStart = -1, bestCount = 0;
+        for (int start = 0; start < lines.size(); start++) {
+            int end = start + MAX_LINES - 1;
+            int count = 0;
+            for (Set<Integer> where : hitsPerWindow) {
+                for (int i : where) {
+                    if (i >= start && i <= end) { count++; break; }
+                }
+            }
+            if (count > bestCount) { bestCount = count; bestStart = start; }
+        }
+        if (bestCount < needed) return List.of();
+        List<Integer> chosen = new ArrayList<>();
+        for (Set<Integer> where : hitsPerWindow) {
+            for (int i : where) {
+                if (i >= bestStart && i <= bestStart + MAX_LINES - 1 && !chosen.contains(i)) chosen.add(i);
             }
         }
-        // Tek parca rastlanti olabilir; en az iki ayri satir tutmali.
-        if (hit.size() < com.audittrove.report.QuoteMatch.minWindowHits()) return List.of();
-        List<Integer> chosen = new ArrayList<>(hit);
         Collections.sort(chosen);
-        return chosen.size() > MAX_LINES ? chosen.subList(0, MAX_LINES) : chosen;
+        return chosen;
     }
 
     private static String normalize(String text) {

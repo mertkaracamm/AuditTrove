@@ -90,4 +90,21 @@ class EvidenceLocatorTest {
                 "Ticari alacakların tahsil edilebilirliği hakkında ayrı bir görüş verilmemiştir.",
                 TWO_COLUMN_PAGE)).isEmpty();
     }
+
+    @Test
+    void fragmentsAreTakenFromTheClusterNotFromAcrossThePage() {
+        // Benzer ifade sayfanin iki ayri yerinde geciyor. Cipa, parcalarin bir arada durdugu yere
+        // oturmali; eskiden her parca icin sayfadaki ilk eslesme alindigi icin arada bir yere kayiyordu.
+        PageText page = new PageText(1, List.of(
+                line("2.2. Tedarikci, liste fiyatlarini yilda iki kez,", 0.100),
+                line("otuz gun onceden bildirmek kaydiyla degistirebilir.", 0.120),
+                line("Bu bolum bos birakilmistir.", 0.300),
+                line("Ek-2: Tedarikci, liste fiyatlarini ayrica ilan eder.", 0.500),
+                line("otuz gun onceden bildirmek kaydiyla duyurulur.", 0.520)));
+        List<AuditResponse.Rect> rects = EvidenceLocator.locateLiteral(
+                "Tedarikci, liste fiyatlarini yilda iki kez, otuz gun onceden bildirmek kaydiyla degistirebilir.",
+                page);
+        assertThat(rects).isNotEmpty();
+        assertThat(rects.get(0).y()).isLessThan(0.2000);
+    }
 }
