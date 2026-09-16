@@ -259,7 +259,12 @@ public enum RubricItem {
      * dediğinde soruluyordu. Danışmanlık sözleşmesi "hizmet sözleşmesi" sayılıp iş sözleşmesi
      * sorularını aldığı için içindeki tek taraflı fesih hakkı hiç sorulmadan rapor temiz çıkıyordu.
      */
-    public static List<RubricItem> withGeneral(List<RubricItem> items) {
+    public static List<RubricItem> withGeneral(Kind kind, List<RubricItem> items) {
+        // Finansal tabloya sözleşme sorusu sorulmaz: "tek taraflı fesih hakkı" diye bir bulgu
+        // faaliyet raporunda yanlış duruyor, kredi taahhütleri zaten finansal listede sorulu.
+        if (kind == Kind.FINANCIAL) {
+            return items == null ? List.of() : List.copyOf(items);
+        }
         List<RubricItem> out = new ArrayList<>();
         EnumSet<Topic> covered = EnumSet.noneOf(Topic.class);
         if (items != null) {

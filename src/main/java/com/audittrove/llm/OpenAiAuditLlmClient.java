@@ -768,7 +768,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             }
             // Genel sorular türden bağımsız her belgeye sorulur; türe özel soru aynı maddeyi
             // soruyorsa genel olan atlanır.
-            items = new ArrayList<>(RubricItem.withGeneral(items));
+            items = new ArrayList<>(RubricItem.withGeneral(kind, items));
             if (items.isEmpty()) return List.of();
             // Kontrol listesi her zaman İngilizce cevaplanır: var/yok kararı rapor diline bağlı olmasın.
             // Kanıt cümleleri sonda dil kapısı tarafından rapor diline çevrilir.
