@@ -28,6 +28,7 @@ import org.springframework.web.client.ResourceAccessException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -1117,14 +1118,19 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             // Alıntı belgeden kelimesi kelimesine alındığı için sayfayı en iyi o söyler. Modelin
             // bildirdiği sayfa uzun raporlarda şaşıyor; bulgu o zaman yanlış sayfaya bağlanıyor ve
             // belge üzerinde işaretlenemiyordu.
-            List<Integer> found = pagesOfQuote(risk.quote(), pages);
-            // Kontrol listesi bulgusunun alıntısı belgenin hiçbir sayfasında geçmiyorsa bulgu rapora
-            // girmez: oylama sınırda kaldığında model belgede olmayan bir cümle yazabiliyor ve aynı
-            // belge iki kez tarandığında bulgu bir çıkıp bir kayboluyordu.
-            if (found.isEmpty() && risk.isRubric() && QuoteMatch.verifiable(risk.quote())) {
+            List<Integer> quoteHits = pagesOfQuote(risk.quote(), pages);
+            // Kontrol listesi bulgusunun alıntısı belgenin hiçbir yerinde geçmiyorsa bulgu rapora
+            // girmez: model belgede olmayan bir cümle yazabiliyor ve tıklanınca gidecek yeri olmuyor.
+            // Alıntının birden fazla yerde geçmesi bunun dışında — ek bölümlü sözleşmelerde aynı madde
+            // tekrar tekrar yazılıyor, o belgelerde bütün kontrol listesi bulguları düşüyordu.
+            if (quoteHits.isEmpty() && risk.isRubric() && QuoteMatch.verifiable(risk.quote())) {
                 log.warn("Kontrol listesi alintisi belgede bulunamadi, dusuruldu: {}", risk.title());
                 continue;
             }
+            SortedSet<Integer> claimedPages = new TreeSet<>(risk.pages());
+            claimedPages.addAll(ev.pages());
+            claimedPages.addAll(fi.pages());
+            List<Integer> found = pageFromQuoteHits(quoteHits, claimedPages);
             if (found.isEmpty()) {
                 found = groundPages(ev.text(), pages);
             }
@@ -1650,6 +1656,21 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // ile "24,833,723" aynı sayıdır, rapor dili belge dilinden farklı olsa da eşleşir.
     /** Alıntının geçtiği sayfalar. Birden fazla sayfada geçiyorsa (tekrar eden madde) hiçbiri
      *  seçilmez; o zaman sayı temelli bulmaya düşülür. */
+    /**
+     * Alıntının eşleştiği sayfalardan bulgunun sayfasını seçer. Tek eşleşme varsa sayfa odur.
+     * Birden çok eşleşmede alıntı hangi sayfa olduğunu söyleyemez; modelin bildirdiği sayfa
+     * eşleşmelerden biriyse o seçilir, değilse sayfa boş döner ve başka yoldan aranır. Eşleşmenin
+     * çokluğu bulguyu geçersiz kılmaz: ek bölümlü sözleşmelerde aynı madde tekrar tekrar yazılır.
+     */
+    static List<Integer> pageFromQuoteHits(List<Integer> quoteHits, Collection<Integer> claimedPages) {
+        if (quoteHits == null || quoteHits.isEmpty()) return List.of();
+        if (quoteHits.size() == 1) return List.copyOf(quoteHits);
+        if (claimedPages == null) return List.of();
+        SortedSet<Integer> overlap = new TreeSet<>(claimedPages);
+        overlap.retainAll(quoteHits);
+        return overlap.isEmpty() ? List.of() : List.of(overlap.first());
+    }
+
     private List<Integer> pagesOfQuote(String quote, Map<Integer, String> pages) {
         if (quote == null || quote.isBlank() || pages.isEmpty()) {
             return List.of();
@@ -1658,7 +1679,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         for (Map.Entry<Integer, String> page : pages.entrySet()) {
             if (QuoteMatch.occursIn(quote, page.getValue())) hits.add(page.getKey());
         }
-        return hits.size() == 1 ? hits : List.of();
+        // Eşleşen sayfaların hepsi döner. Kaç tane olduğuna göre ne yapılacağına çağıran karar verir:
+        // tek sayfaysa sayfa odur, birden çoksa sayfa belirsizdir ama alıntı belgede vardır.
+        return hits;
     }
 
     private List<Integer> groundPages(String evidence, Map<Integer, String> pages) {
