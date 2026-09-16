@@ -45,6 +45,9 @@ public final class EvidenceLocator {
                 if (rects.isEmpty()) rects = locate(risk.quote(), page);
                 if (rects.isEmpty()) rects = locate(risk.evidence(), page);
                 if (rects.isEmpty()) rects = locate(risk.finding(), page);
+                // Konumu bulunamayan sayfa için çıpa eklenmez. Boş dikdörtgen listesi taşıyan çıpa
+                // görüntüleyiciye "burada işaretlenecek bir yer var" diyor, oysa yok.
+                if (rects.isEmpty()) continue;
                 anchors.add(new AuditResponse.Anchor(p, rects));
             }
             AuditResponse.Risk anchored = anchors.isEmpty() ? risk : risk.withAnchors(anchors);
