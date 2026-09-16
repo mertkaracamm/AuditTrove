@@ -884,6 +884,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             general (any other contract, offer, notice or document). Answer with the kind only.
             """;
 
+    // Belge turunu yalnizca birincil model secer. Burada da uc model oyluyordu ve oy zipliyordu:
+    // ayni belge bir kosuda GENERAL (1-2), digerinde EMPLOYMENT (2-1) cikip farkli soru setini
+    // aliyordu, bulgu seti ve skor onunla birlikte degisiyordu. Tur yanlis secilse bile genel
+    // sorular her belgeye soruldugu icin taban kaybolmuyor, sadece ture ozel sorular kaciyor.
     private RubricItem.Kind classifyKind(String chunk) {
         List<String> kinds = Arrays.stream(RubricItem.Kind.values())
                 .filter(k -> k != RubricItem.Kind.OTHER)
@@ -892,25 +896,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 "type", "object", "additionalProperties", false,
                 "required", List.of("kind"),
                 "properties", Map.of("kind", Map.of("type", "string", "enum", kinds)));
-        List<CompletableFuture<RubricItem.Kind>> secondary = new ArrayList<>();
-        if (multiModelEnabled) {
-            String schemaText;
-            try { schemaText = objectMapper.writeValueAsString(schema); } catch (Exception e) { schemaText = null; }
-            if (schemaText != null) {
-                String sys = CLASSIFY_PROMPT + "\nRespond with ONLY one JSON object that validates against this JSON Schema:\n" + schemaText;
-                for (SecondaryBackend b : secondaryBackends.stream().filter(SecondaryBackend::configured).toList()) {
-                    secondary.add(CompletableFuture.supplyAsync(() -> {
-                        try {
-                            JsonNode n = objectMapper.readTree(extractJsonObject(secondaryCall(b, sys, chunk)));
-                            return RubricItem.kindOf(n.path("kind").asText());
-                        } catch (Exception e) {
-                            return RubricItem.Kind.OTHER;
-                        }
-                    }, crossCheckExecutor));
-                }
-            }
-        }
-        RubricItem.Kind primary = RubricItem.Kind.GENERAL;
+        RubricItem.Kind kind = RubricItem.Kind.GENERAL;
         try {
             Map<String, Object> body = Map.of(
                     "model", model, "temperature", 0, "seed", 7,
@@ -921,28 +907,13 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                             Map.of("role", "user", "content", chunk)));
             JsonNode response = postToLlmWithRetry(body);
             JsonNode out = objectMapper.readTree(response.at("/choices/0/message/content").asText());
-            primary = RubricItem.kindOf(out.path("kind").asText());
+            kind = RubricItem.kindOf(out.path("kind").asText());
         } catch (Exception e) {
             log.warn("Belge turu siniflandirilamadi, genel liste kullaniliyor: {}", e.toString());
         }
-        if (primary == RubricItem.Kind.OTHER) primary = RubricItem.Kind.GENERAL;
-        Map<RubricItem.Kind, Integer> votes = new java.util.EnumMap<>(RubricItem.Kind.class);
-        votes.merge(primary, 1, Integer::sum);
-        try {
-            CompletableFuture.allOf(secondary.toArray(new CompletableFuture[0])).get(CROSS_GRACE_SECONDS, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            log.warn("Tur oylari zamaninda gelmedi: {}", e.toString());
-        }
-        for (CompletableFuture<RubricItem.Kind> f : secondary) {
-            RubricItem.Kind k = f.getNow(RubricItem.Kind.OTHER);
-            if (k != RubricItem.Kind.OTHER) votes.merge(k, 1, Integer::sum);
-        }
-        RubricItem.Kind best = primary;
-        for (Map.Entry<RubricItem.Kind, Integer> e : votes.entrySet()) {
-            if (e.getValue() > votes.get(best)) best = e.getKey();
-        }
-        log.info("Belge turu: {} (oylar {})", best, votes);
-        return best;
+        if (kind == RubricItem.Kind.OTHER) kind = RubricItem.Kind.GENERAL;
+        log.info("Belge turu: {}", kind);
+        return kind;
     }
 
     private String rubricQuestions(List<RubricItem> items) {
