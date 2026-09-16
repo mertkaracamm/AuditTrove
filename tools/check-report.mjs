@@ -252,7 +252,11 @@ function check(result, lang, lines) {
   // bulgu eşiği geçirmesin diye; iki yerde iki kural olursa hangisinin doğru olduğu belirsizleşir.
   const weight = counted.reduce((sum, r) => sum + (rank[r.severity] || 0), 0);
   const light = weight <= 4;
-  const expected = { 4: light ? 22 : 12, 3: light ? 47 : 36, 2: light ? 72 : 60, 1: light ? 88 : 82, 0: 95 }[top];
+  // Skora giren bulgu yokken raporda ek gözlem duruyorsa sunucu 95 ("temiz") basmaz, 88 basar.
+  const observation = risks.some((r) => r.source === 'model');
+  const expected = top === 0 && observation
+    ? 88
+    : { 4: light ? 22 : 12, 3: light ? 47 : 36, 2: light ? 72 : 60, 1: light ? 88 : 82, 0: 95 }[top];
   if (!SCORES.has(result.riskScore)) f('skor', `${result.riskScore} tanımlı 9 değerden değil`);
   else if (result.riskScore !== expected) f('skor', `${result.riskScore}, bulgulara göre ${expected} olmalıydı`);
 

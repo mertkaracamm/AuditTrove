@@ -2,7 +2,9 @@ package com.audittrove.report;
 
 import com.audittrove.financial.Lang;
 
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
 
@@ -60,7 +62,7 @@ public enum RubricItem {
             "Depozito şartı ve iade koşulları",
             "Deposit requirement and refund terms",
             "Does the lease require a deposit?"),
-    RENT_AUTO_RENEWAL(Kind.RENTAL, "MEDIUM",
+    RENT_AUTO_RENEWAL(Kind.RENTAL, "MEDIUM", Topic.AUTO_RENEWAL,
             "Otomatik yenileme ve uzun bildirim süresi",
             "Automatic renewal with a long notice period",
             "Does the lease state that it renews or extends automatically unless notice is given?"),
@@ -68,11 +70,11 @@ public enum RubricItem {
             "Kira artış kuralı",
             "Rent increase rule",
             "Does the lease contain a rent increase rule?"),
-    RENT_UNILATERAL_TERMINATION(Kind.RENTAL, "MEDIUM",
+    RENT_UNILATERAL_TERMINATION(Kind.RENTAL, "MEDIUM", Topic.TERMINATION,
             "Kiraya verenin süre bitiminden önce fesih hakkı",
             "Landlord may terminate before the end of the term",
             "Does the lease give the landlord a right to terminate before the end of the term under stated conditions?"),
-    RENT_PENALTIES(Kind.RENTAL, "MEDIUM",
+    RENT_PENALTIES(Kind.RENTAL, "MEDIUM", Topic.PENALTY,
             "Cezai şart, gecikme veya erken çıkış bedeli",
             "Penalty, late-payment or early-exit charge",
             "Does the lease contain a penalty, late-payment charge or early-exit charge?"),
@@ -106,7 +108,7 @@ public enum RubricItem {
             "Bonus tamamen işverenin takdirinde",
             "Bonus entirely at employer's discretion",
             "Is bonus or variable pay described as discretionary or not guaranteed?"),
-    EMP_LIQUIDATED_DAMAGES(Kind.EMPLOYMENT, "MEDIUM",
+    EMP_LIQUIDATED_DAMAGES(Kind.EMPLOYMENT, "MEDIUM", Topic.PENALTY,
             "Çalışana yönelik cezai şart",
             "Liquidated damages against the employee",
             "Does the contract specify a fixed penalty or liquidated-damages amount payable by the employee?"),
@@ -116,11 +118,11 @@ public enum RubricItem {
             "Can the employer change the place of work or duties by giving notice?"),
 
     // ---- Abonelik / üyelik ----
-    SUB_AUTO_RENEWAL(Kind.SUBSCRIPTION, "MEDIUM",
+    SUB_AUTO_RENEWAL(Kind.SUBSCRIPTION, "MEDIUM", Topic.AUTO_RENEWAL,
             "Otomatik yenileme",
             "Automatic renewal",
             "Does the agreement state that it renews automatically unless cancelled?"),
-    SUB_EARLY_TERMINATION_FEE(Kind.SUBSCRIPTION, "HIGH",
+    SUB_EARLY_TERMINATION_FEE(Kind.SUBSCRIPTION, "HIGH", Topic.PENALTY,
             "Erken iptal bedeli",
             "Early-termination fee",
             "Does early cancellation require a payment (remaining fees or a fixed amount)?"),
@@ -154,7 +156,7 @@ public enum RubricItem {
             "Muafiyet ve teminat limitleri",
             "Deductible and coverage limits",
             "Does the policy state a deductible or coverage limit amount?"),
-    INS_CLAIM_DEADLINES(Kind.INSURANCE, "MEDIUM",
+    INS_CLAIM_DEADLINES(Kind.INSURANCE, "MEDIUM", Topic.DEADLINES,
             "Kısa hasar bildirim süresi veya ağır yükümlülükler",
             "Short claim deadlines or heavy obligations",
             "Does the policy state a deadline for notifying claims?"),
@@ -172,7 +174,7 @@ public enum RubricItem {
             "Ödeme devirden önce",
             "Payment due before transfer of ownership",
             "Does the document require full payment before the ownership transfer is completed?"),
-    VEH_LIABILITY_DISCLAIMER(Kind.VEHICLE, "MEDIUM",
+    VEH_LIABILITY_DISCLAIMER(Kind.VEHICLE, "MEDIUM", Topic.LIABILITY,
             "Satıcı sorumluluğunu sınırlıyor",
             "Seller limits liability",
             "Does the seller disclaim liability for defects, mileage or damage history?"),
@@ -182,23 +184,23 @@ public enum RubricItem {
             "Does the document declare accident damage, mileage or prior use?"),
 
     // ---- Genel sözleşme / diğer ----
-    GEN_UNILATERAL_TERMINATION(Kind.GENERAL, "HIGH",
+    GEN_UNILATERAL_TERMINATION(Kind.GENERAL, "HIGH", Topic.TERMINATION,
             "Karşı tarafa tek taraflı fesih hakkı",
             "Counterparty's unilateral termination right",
             "Does the document give the other party a right to terminate unilaterally?"),
-    GEN_PENALTIES(Kind.GENERAL, "MEDIUM",
+    GEN_PENALTIES(Kind.GENERAL, "MEDIUM", Topic.PENALTY,
             "Cezai şart",
             "Penalty clause",
             "Does the document contain a penalty or liquidated-damages clause binding the reader?"),
-    GEN_AUTO_RENEWAL(Kind.GENERAL, "MEDIUM",
+    GEN_AUTO_RENEWAL(Kind.GENERAL, "MEDIUM", Topic.AUTO_RENEWAL,
             "Otomatik yenileme",
             "Automatic renewal",
             "Does the document state that it renews automatically?"),
-    GEN_LIABILITY_WAIVER(Kind.GENERAL, "MEDIUM",
+    GEN_LIABILITY_WAIVER(Kind.GENERAL, "MEDIUM", Topic.LIABILITY,
             "Sorumluluk sınırlaması veya feragat",
             "Liability limitation or waiver",
             "Does the document contain a waiver of the reader's rights or a limitation of the other party's liability?"),
-    GEN_BINDING_DEADLINES(Kind.GENERAL, "LOW",
+    GEN_BINDING_DEADLINES(Kind.GENERAL, "LOW", Topic.DEADLINES,
             "Bağlayıcı süreler ve bildirim şartları",
             "Binding deadlines and notice requirements",
             "Does the document set deadlines or notice periods binding the reader?"),
@@ -210,15 +212,28 @@ public enum RubricItem {
     /** Belge türü. Çıkarım belgeyi sınıflar; kullanıcının tip seçimine bağlı değil. */
     public enum Kind { FINANCIAL, RENTAL, EMPLOYMENT, SUBSCRIPTION, INSURANCE, VEHICLE, GENERAL, OTHER }
 
+    /**
+     * Genel soruyla türe özel sorunun aynı maddeyi sorduğu durumlar. Kira sözleşmesinde hem
+     * "kiraya verenin fesih hakkı" hem "karşı tarafa tek taraflı fesih hakkı" sorulursa aynı
+     * madde rapora iki başlıkla giriyor; konusu tutulan genel soru sorulmaz.
+     */
+    public enum Topic { NONE, TERMINATION, PENALTY, AUTO_RENEWAL, LIABILITY, DEADLINES }
+
     private final Kind kind;
     private final String severity;
+    private final Topic topic;
     private final String trTitle;
     private final String enTitle;
     private final String question;
 
     RubricItem(Kind kind, String severity, String trTitle, String enTitle, String question) {
+        this(kind, severity, Topic.NONE, trTitle, enTitle, question);
+    }
+
+    RubricItem(Kind kind, String severity, Topic topic, String trTitle, String enTitle, String question) {
         this.kind = kind;
         this.severity = severity;
+        this.topic = topic;
         this.trTitle = trTitle;
         this.enTitle = enTitle;
         this.question = question;
@@ -234,6 +249,32 @@ public enum RubricItem {
         if (id == null) return null;
         for (RubricItem r : values()) if (r.id().equals(id.trim().toLowerCase(Locale.ROOT))) return r;
         return null;
+    }
+
+    public Topic topic() { return topic; }
+
+    /**
+     * Verilen soruların üzerine genel soruları ekler. Tek taraflı fesih, cezai şart, otomatik yenileme
+     * gibi maddeler belgenin türünden bağımsız geçerli; önceden yalnızca sınıflandırma tam "general"
+     * dediğinde soruluyordu. Danışmanlık sözleşmesi "hizmet sözleşmesi" sayılıp iş sözleşmesi
+     * sorularını aldığı için içindeki tek taraflı fesih hakkı hiç sorulmadan rapor temiz çıkıyordu.
+     */
+    public static List<RubricItem> withGeneral(List<RubricItem> items) {
+        List<RubricItem> out = new ArrayList<>();
+        EnumSet<Topic> covered = EnumSet.noneOf(Topic.class);
+        if (items != null) {
+            for (RubricItem r : items) {
+                if (out.contains(r)) continue;
+                out.add(r);
+                if (r.topic != Topic.NONE) covered.add(r.topic);
+            }
+        }
+        for (RubricItem g : forKind(Kind.GENERAL)) {
+            if (out.contains(g)) continue;
+            if (g.topic != Topic.NONE && covered.contains(g.topic)) continue;
+            out.add(g);
+        }
+        return out;
     }
 
     public static List<RubricItem> forKind(Kind kind) {

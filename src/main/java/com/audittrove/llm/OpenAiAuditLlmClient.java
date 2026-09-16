@@ -766,6 +766,9 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 log.warn("Belge turu uyusmuyor: secilen={} algilanan={} — iki turun sorulari birlikte soruluyor", picked, detected);
                 items.addAll(RubricItem.forKind(detected));
             }
+            // Genel sorular türden bağımsız her belgeye sorulur; türe özel soru aynı maddeyi
+            // soruyorsa genel olan atlanır.
+            items = new ArrayList<>(RubricItem.withGeneral(items));
             if (items.isEmpty()) return List.of();
             // Kontrol listesi her zaman İngilizce cevaplanır: var/yok kararı rapor diline bağlı olmasın.
             // Kanıt cümleleri sonda dil kapısı tarafından rapor diline çevrilir.
@@ -1790,8 +1793,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
     private int calibrateScore(int ignoredLlmScore, List<AuditResponse.Risk> risks) {
         int top = 0, weight = 0;
+        boolean observation = false;
         if (risks != null) {
             for (AuditResponse.Risk r : risks) {
+                if (r.isModel()) observation = true;
                 if (isCrossAddition(r) || r.isModel()) continue; // ek gözlemler skora girmez
                 int rank = severityRank(r.severity());
                 if (rank == 0) continue;
@@ -1801,6 +1806,11 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 weight += rank;
                 top = Math.max(top, rank);
             }
+        }
+        // Skora giren bulgu yokken ekranda ek gözlem duruyorsa 95 basmıyoruz: kullanıcı bulguyu
+        // görürken altında "belge temiz" yazıyordu. 88 bandı ("küçük notlar") bu durumu doğru anlatıyor.
+        if (top == 0 && observation) {
+            return com.audittrove.report.ScoreScale.of(1, 1);
         }
         return com.audittrove.report.ScoreScale.of(top, weight);
     }

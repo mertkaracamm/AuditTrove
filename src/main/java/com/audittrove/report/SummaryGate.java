@@ -109,6 +109,14 @@ public final class SummaryGate {
     public static String rationale(List<AuditResponse.Risk> risks, Lang lang) {
         Counts c = Counts.of(risks);
         if (c.total == 0) {
+            // Ek gözlem varken "temiz" demek yanlıştı: raporda bulgu dururken skorun altında
+            // belgenin temiz olduğu yazıyordu. Gözlemler skora girmiyor, bunu söylemek gerekiyor.
+            boolean observation = risks != null && risks.stream().anyMatch(AuditResponse.Risk::isModel);
+            if (observation) {
+                return lang.isTurkish()
+                        ? "Kontrol listesinden skora giren bulgu çıkmadı; aşağıdaki gözlemler skora dahil edilmiyor."
+                        : "No checklist finding counts toward the score; the observations below are not included in it.";
+            }
             return lang.isTurkish()
                     ? "Skora giren bulgu yok; belge bu incelemede temiz görünüyor."
                     : "No finding counts toward the score; the document looks clean in this review.";

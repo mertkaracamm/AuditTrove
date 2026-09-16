@@ -50,3 +50,6 @@ dump/
 tools/node_modules/
 tools/package.json
 tools/package-lock.json
+ops-alinti.json
+dump-alinti/
+dump-az/
