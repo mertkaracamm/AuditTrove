@@ -25,6 +25,10 @@ public final class ReportGate {
     private static final Pattern VALUE_WITH_UNIT = Pattern.compile(
             "^\\s*(%|[\\p{Lu}]{2,4}|[$€£₺¥])?\\s*([-(−]?\\d[\\d.,\\s]*\\d\\)?|\\d)\\s*(%|[\\p{L}][\\p{L}\\s./']*)?\\s*$");
     private static final int MAX_TEXT_VALUE = 40;
+    // Rakamla kelimeyi birlikte tasiyan deger ayristirilamamis bir sayidir; uzun tarih bunun disinda.
+    private static final Pattern DIGIT_IN_VALUE = Pattern.compile("\\d");
+    private static final Pattern WORD_IN_VALUE = Pattern.compile("(?U)\\p{L}{3,}");
+    private static final Pattern LONG_DATE = Pattern.compile("(?U)^\\d{1,2}\\s\\p{L}+\\s\\d{4}$");
 
     /** Ham tablo satırı görünümü: sayılar çok, kelimeler az ("Esas Faaliyet KARI 28.984.491 63.551.075"). */
     public static boolean looksLikeRawRow(String text) {
@@ -87,6 +91,12 @@ public final class ReportGate {
         }
         // Sayı değil: "Olumlu görüş", "31 Aralık 2024" gibi kısa metinler kalır, cümleler düşer.
         if (value.length() > MAX_TEXT_VALUE || value.endsWith(".")) return null;
+        // "Günlük binde 3" gibi bir değer sayı da değil düz metin de değil; sayı öne gelmediği için
+        // ayrıştırılamamış bir orandır. Karta yarım bir ifade basmak yerine kartı hiç basmıyoruz.
+        if (DIGIT_IN_VALUE.matcher(value).find() && WORD_IN_VALUE.matcher(value).find()
+                && !LONG_DATE.matcher(value).matches()) {
+            return null;
+        }
         return new AuditResponse.KeyMetric(m.label(), value, unit, m.note());
     }
 

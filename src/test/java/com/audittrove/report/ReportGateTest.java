@@ -55,4 +55,21 @@ class ReportGateTest {
                 List.of(3), AuditResponse.Risk.ENGINE, "");
         assertThat(ReportGate.gateRisk(risk)).isNull();
     }
+
+    @Test
+    void aRateWrittenAsAPhraseIsNotShownAsACard() {
+        // "Gunluk binde 3" sayi one gelmedigi icin ayristirilamiyor; karta yarim ifade basmiyoruz.
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric(
+                "Gecikme Cezası", "Günlük binde 3", "", ""))).isNull();
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric(
+                "Erken Kapama", "Kalan anaparanın %2'si", "", ""))).isNull();
+    }
+
+    @Test
+    void aPlainTextValueAndALongDateStillPass() {
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric(
+                "Denetçi Görüşü", "Olumlu görüş", "", ""))).isNotNull();
+        assertThat(ReportGate.gateMetric(new AuditResponse.KeyMetric(
+                "Bilanço Tarihi", "31 Aralık 2024", "", ""))).isNotNull();
+    }
 }
