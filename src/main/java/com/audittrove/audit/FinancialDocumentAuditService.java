@@ -25,15 +25,18 @@ import java.util.Map;
 @Service
 public class FinancialDocumentAuditService {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(FinancialDocumentAuditService.class);
+    private final PdfTextExtractor pdfTextExtractor;
     private final OcrPageReader ocrPageReader;
     private final RegulationRetriever regulationRetriever;
     private final AuditLlmClient llmClient;
     private final long maxPdfBytes;
 
-    public FinancialDocumentAuditService(OcrPageReader ocrPageReader,
+    public FinancialDocumentAuditService(PdfTextExtractor pdfTextExtractor,
+                                         OcrPageReader ocrPageReader,
                                          RegulationRetriever regulationRetriever,
                                          AuditLlmClient llmClient,
                                          @Value("${audittrove.max-pdf-bytes:15728640}") long maxPdfBytes) {
+        this.pdfTextExtractor = pdfTextExtractor;
         this.ocrPageReader = ocrPageReader;
         this.regulationRetriever = regulationRetriever;
         this.llmClient = llmClient;
@@ -134,12 +137,13 @@ public class FinancialDocumentAuditService {
     private AuditResponse runAudit(String filename, byte[] content, String language, String documentType) {
         validate(filename, content);
         try {
-            // Metin de satir konumlari da TEK kaynaktan okunur. Once iki ayri cikarim vardi
-            // (inceleme PDFTextStripper'i, cipalar PdfGeometry'yi) ve tablo basliklari ikisinde farkli
-            // siraya giriyordu: modelin gordugu cumle cipa tarafinda bulunamayip bulgu sayfada
-            // isaretlenemiyordu. Tek kaynak bu sinifi tamamen ortadan kaldiriyor.
+            // İnceleme metni PDFTextStripper'dan, çıpalar PdfGeometry'den okunur. Bir ara ikisini tek
+            // kaynağa (geometri satırlarına) indirdik; geometri satırları konuma göre sıralı olduğu için
+            // iki sütunlu sayfada sol ve sağ sütun satır satır birbirine karışıyor ve model daha az
+            // bulgu çıkarıyordu (ölçüm: iki sütunlu dağıtım sözleşmesi 36 yerine 60 aldı, cezai şart ve
+            // tek taraflı fesih maddeleri kayboldu). Okuma sırası bulguyu belirliyor, o yüzden ayrı kaldı.
             Map<Integer, PageText> pages = PdfGeometry.read(content);
-            PdfTextExtractor.ExtractResult extracted = PdfTextExtractor.fromPages(pages, pages.size());
+            PdfTextExtractor.ExtractResult extracted = pdfTextExtractor.extractOrNull(content);
             if (extracted == null) {
                 // Metin katmani yok: taranmis ya da telefonla cekilmis belge. Metin de satir konumlari da
                 // OCR'dan gelir; ikisi ayni kaynak oldugu icin bulgular sayfada yine isaretlenebilir.
