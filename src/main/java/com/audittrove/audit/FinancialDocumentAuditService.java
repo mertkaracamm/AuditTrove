@@ -131,10 +131,22 @@ public class FinancialDocumentAuditService {
     /** cancelled: kullanıcı incelemeyi bıraktı mı. Bayrak model çağrılarına kadar iner, kalanlar yapılmaz. */
     public AuditResponse audit(String filename, byte[] content, String language, String documentType,
                                java.util.function.BooleanSupplier cancelled) {
-        return CancelScope.run(cancelled, () -> runAudit(filename, content, language, documentType));
+        return CancelScope.run(cancelled, () -> runAudit(filename, content, language, documentType, true));
     }
 
-    private AuditResponse runAudit(String filename, byte[] content, String language, String documentType) {
+    /**
+     * MCP istemcileri için: metin katmanı olmayan belgede OCR denenmez, istemciye metni kendisinin
+     * göndermesi söylenir. Çünkü MCP çağrısının istemci tarafında sabit bir süre sınırı var
+     * (ChatGPT'de 60 saniye) ve ölçtüğümüz kadarıyla taranmış iki sayfa tek başına 36 saniye sürüyor;
+     * dört beş sayfalık bir tarama sınırı aşıp çağrıyı düşürür, üstelik model bedeli de boşa gider.
+     * Uygulamanın kendi yolunda OCR açık kalır, orada kullanıcı ilerlemeyi görerek bekliyor.
+     */
+    public AuditResponse auditWithoutOcr(String filename, byte[] content, String language, String documentType) {
+        return CancelScope.run(() -> false, () -> runAudit(filename, content, language, documentType, false));
+    }
+
+    private AuditResponse runAudit(String filename, byte[] content, String language, String documentType,
+                                   boolean ocrAllowed) {
         validate(filename, content);
         try {
             // İnceleme metni PDFTextStripper'dan, çıpalar PdfGeometry'den okunur. Bir ara ikisini tek
@@ -144,6 +156,11 @@ public class FinancialDocumentAuditService {
             // tek taraflı fesih maddeleri kayboldu). Okuma sırası bulguyu belirliyor, o yüzden ayrı kaldı.
             Map<Integer, PageText> pages = PdfGeometry.read(content);
             PdfTextExtractor.ExtractResult extracted = pdfTextExtractor.extractOrNull(content);
+            if (extracted == null && !ocrAllowed) {
+                throw new InvalidDocumentException(
+                        "This PDF has no text layer (it is a scan or a photo). Extract the text yourself "
+                                + "and send it as pageTexts or documentText.");
+            }
             if (extracted == null) {
                 // Metin katmani yok: taranmis ya da telefonla cekilmis belge. Metin de satir konumlari da
                 // OCR'dan gelir; ikisi ayni kaynak oldugu icin bulgular sayfada yine isaretlenebilir.

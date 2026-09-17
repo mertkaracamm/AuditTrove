@@ -80,7 +80,7 @@ public class McpController {
             audit = auditService.auditText(documentText, pages, language, documentType);
         } else if (pdfBase64 != null && !pdfBase64.isBlank()) {
             String filename = arguments.hasNonNull("filename") ? arguments.path("filename").asText() : "document.pdf";
-            audit = auditService.audit(filename, decodePdf(pdfBase64), language, documentType);
+            audit = auditService.auditWithoutOcr(filename, decodePdf(pdfBase64), language, documentType);
         } else {
             throw new IllegalArgumentException(
                     "Provide the document as documentText or pageTexts (preferred), or as pdfBase64.");
@@ -140,7 +140,8 @@ public class McpController {
                                                         "page", Map.of("type", "integer", "description", "1-based page number"),
                                                         "text", Map.of("type", "string", "description", "Text of that page")))),
                                 "pdfBase64", Map.of("type", "string", "description",
-                                        "Base64-encoded PDF. Only for clients that can send raw bytes."),
+                                        "Base64-encoded PDF. Only for clients that can send raw bytes, and only "
+                                                + "for PDFs that have a text layer. Send scans as pageTexts."),
                                 "filename", Map.of("type", "string", "description",
                                         "Document file name. Optional, used for display."),
                                 "language", Map.of("type", "string", "description",
