@@ -807,8 +807,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                         yes++;
                         if (first == null) first = a; // kanıt öncelikle birincilden
                     }
-                    // Birden fazla oy varsa (birincil cevap veremeyip yedeğe düşülen hâl) sınırda kalan
-                    // madde loga düşsün; tek oyda sınır diye bir şey yok, her madde sınırda görünürdü.
+                    // Sınırda kalan madde (eşiği tam tutturan ya da bir oyla kaçıran) loga düşsün:
+                    // aynı belgenin farklı rapor almasının kaynağı bu maddeler, hangileri olduğunu görelim.
                     if (votes.size() > 1 && (yes == needed || yes == needed - 1)) {
                         log.warn("Kontrol listesi sinirda: {} — {}/{} oy", item.id(), yes, votes.size());
                     }
@@ -841,23 +841,44 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // atlıyordu. İkincil modeller çapraz kontrolde ve belge türü oylamasında çalışmaya devam ediyor.
     // Birincil cevap veremezse parça oysuz kalır (boş liste) ve inceleme hata verir; listesiz rapor
     // "temiz" görünür, bu yanlış rapordur.
+    // Kontrol listesi ayni modele UC kez, farkli seed'lerle sorulur ve cogunluk alinir. Tek ornekte
+    // terse belgelerde (etiket-deger satirlarindan ibaret formlar) ayni belge kosudan kosuya 1 ile 6
+    // arasi bulgu veriyordu: temperature 0 ve sabit seed garanti degil, model sinirdaki maddede fikir
+    // degistiriyor. Uc ornek sinirdaki maddeyi sondurur. Ornekler ayni anda gider, sure degismez.
+    private static final int[] RUBRIC_SEEDS = {7, 17, 27};
+
     private List<RubricResult> rubricVotes(String system, Map<String, Object> schema, String chunk) {
+        List<CompletableFuture<RubricResult>> samples = new ArrayList<>();
+        for (int seed : RUBRIC_SEEDS) {
+            samples.add(CompletableFuture.supplyAsync(
+                    () -> rubricSample(system, schema, chunk, seed), fanOutExecutor));
+        }
         List<RubricResult> votes = new ArrayList<>();
+        for (CompletableFuture<RubricResult> sample : samples) {
+            RubricResult result = sample.join();
+            if (result != null) votes.add(result);
+        }
+        // Hicbir ornek cevap vermediyse parca oysuz kalir; listesiz rapor "temiz" gorunur, o yuzden
+        // cagiran bunu hata olarak ele alir.
+        if (votes.isEmpty()) log.warn("Kontrol listesi hicbir ornekte cevap vermedi");
+        return votes;
+    }
+
+    private RubricResult rubricSample(String system, Map<String, Object> schema, String chunk, int seed) {
         try {
             Map<String, Object> body = Map.of(
-                    "model", model, "temperature", 0, "seed", 7,
+                    "model", model, "temperature", 0, "seed", seed,
                     "response_format", Map.of("type", "json_schema", "json_schema",
                             Map.of("name", "checklist", "strict", true, "schema", schema)),
                     "messages", List.of(
                             Map.of("role", "system", "content", system),
                             Map.of("role", "user", "content", chunk)));
             JsonNode response = postToLlmWithRetry(body);
-            votes.add(objectMapper.readValue(response.at("/choices/0/message/content").asText(), RubricResult.class));
+            return objectMapper.readValue(response.at("/choices/0/message/content").asText(), RubricResult.class);
         } catch (Exception e) {
-            log.warn("Kontrol listesi birincil cevap alinamadi: {}", e.toString());
-            return List.of();
+            log.warn("Kontrol listesi ornegi (seed {}) alinamadi: {}", seed, e.toString());
+            return null;
         }
-        return votes;
     }
 
     /**
