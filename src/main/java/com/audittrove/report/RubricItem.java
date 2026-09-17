@@ -195,7 +195,9 @@ public enum RubricItem {
     GEN_AUTO_RENEWAL(Kind.GENERAL, "MEDIUM", Topic.AUTO_RENEWAL,
             "Otomatik yenileme",
             "Automatic renewal",
-            "Does the document state that it renews automatically?"),
+            "Does the document state that it renews or extends automatically unless notice is given? "
+                    + "A clause saying the contract simply ends or expires at the end of its term is NOT "
+                    + "automatic renewal."),
     GEN_LIABILITY_WAIVER(Kind.GENERAL, "MEDIUM", Topic.LIABILITY,
             "Sorumluluk sınırlaması veya feragat",
             "Liability limitation or waiver",

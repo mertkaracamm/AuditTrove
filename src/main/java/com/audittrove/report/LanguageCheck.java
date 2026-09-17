@@ -38,6 +38,10 @@ public final class LanguageCheck {
         int trLetters = 0;
         for (char c : text.toCharArray()) if ("ğşıçöü".indexOf(c) >= 0) trLetters++;
         if (trLetters >= 2 && en < 3) return Lang.TR;
+        // Türkçe cümlede ya Türkçeye özgü bir küçük harf ya da bir Türkçe bağlaç bulunur. İkisi de yokken
+        // İngilizce bir bağlaç varsa cümle İngilizcedir; kısa İngilizce cümleler ("The contract ends
+        // automatically after 6 months without renewal.") tek bağlaçla eşik farkına takılmayıp geçiyordu.
+        if (words >= MIN_WORDS && trLetters == 0 && tr == 0 && en >= 1) return Lang.EN;
         if (words < MIN_WORDS || Math.abs(tr - en) < MIN_MARGIN) return null;
         return tr > en ? Lang.TR : Lang.EN;
     }
@@ -51,6 +55,7 @@ public final class LanguageCheck {
         for (AuditResponse.Risk risk : r.risks()) {
             i++;
             check("risk[" + i + "].title", risk.title(), expected, out);
+            check("risk[" + i + "].finding", risk.finding(), expected, out);
             check("risk[" + i + "].evidence", risk.evidence(), expected, out);
         }
         i = 0;
