@@ -1,5 +1,6 @@
 package com.audittrove.report;
 
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -23,10 +24,18 @@ public final class QuoteMatch {
     private QuoteMatch() {
     }
 
-    /** Karşılaştırma için sadeleştirme: boşluklar teke iner, tırnak çeşitleri düzleşir, küçük harf. */
+    /**
+     * Karşılaştırma için sadeleştirme: bitişik harfler ayrılır, boşluklar teke iner, tırnak çeşitleri
+     * düzleşir, küçük harfe inilir.
+     *
+     * Bitişik harf (ligatür) adımı şart: PDF metni "tek taraﬂı" gibi tek karakterlik ﬂ taşıyabiliyor,
+     * aynı cümlenin başka bir kopyası ise düz "taraflı" yazıyor. İkisi farklı string olduğu için aynı
+     * madde iki ayrı bulgu olarak rapora giriyordu.
+     */
     public static String flatten(String text) {
         if (text == null) return "";
-        String flat = text.replace('‘', '\'').replace('’', '\'')
+        String flat = Normalizer.normalize(text, Normalizer.Form.NFKC)
+                .replace('‘', '\'').replace('’', '\'')
                 .replace('“', '"').replace('”', '"')
                 .replace('–', '-').replace('—', '-')
                 .replace(' ', ' ');

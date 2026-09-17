@@ -80,4 +80,20 @@ class QuoteMatchTest {
     void curlyQuotesAndDoubleSpacesAreNormalised() {
         assertThat(QuoteMatch.flatten("  Grup’un  “kur” farkı ")).isEqualTo("grup'un \"kur\" farkı");
     }
+
+    @Test
+    void ligaturesAreTreatedAsPlainLetters() {
+        // PDF metni "tek tara\uFB02\u0131" gibi tek karakterlik ligatur tasiyabiliyor; ayni cumlenin
+        // duz yazilmis kopyasiyla esitlenmeli, yoksa ayni madde iki bulgu oluyor.
+        String ligature = "Hizmet alan, sözleşmeyi tek tara\uFB02ı olarak feshedebilir.";
+        String plain = "Hizmet alan, sözleşmeyi tek taraflı olarak feshedebilir.";
+        assertThat(QuoteMatch.flatten(ligature)).isEqualTo(QuoteMatch.flatten(plain));
+        assertThat(QuoteMatch.occursIn(plain, "Madde 3. " + ligature)).isTrue();
+        assertThat(QuoteMatch.occursIn(ligature, "Madde 3. " + plain)).isTrue();
+    }
+
+    @Test
+    void turkishLettersSurviveTheNormalisation() {
+        assertThat(QuoteMatch.flatten("İŞĞÜÖÇ ıi")).isEqualTo("işğüöç ıi");
+    }
 }
