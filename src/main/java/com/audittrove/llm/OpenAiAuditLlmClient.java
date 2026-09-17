@@ -745,8 +745,6 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             For present items also give quote: the exact words from the document the answer rests on, copied
             verbatim in the document's own language (do not translate, do not paraphrase), at most 15 words.
             For absent items evidence and quote are "" and page 0.
-            The checklist questions are in English. Answer present=true/false exactly the same way
-            whatever the OUTPUT LANGUAGE is; the output language changes only the wording of evidence.
             """;
 
     private record RubricAnswer(String id, boolean present, String evidence, String quote, int page) {}
@@ -773,11 +771,11 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             // soruyorsa genel olan atlanır.
             items = new ArrayList<>(RubricItem.withGeneral(kind, items));
             if (items.isEmpty()) return List.of();
-            // Sorular İngilizce sorulur — var/yok kararı rapor diline bağlı olmasın. Kanıt cümlesi ise
-            // doğrudan rapor dilinde isteniyor: eskiden İngilizce yazılıp sonda dil kapısı tarafından
-            // çevriliyordu, yani Türkçe belge → İngilizce özet → Türkçe çeviri diye iki kayıplı atlama
-            // vardı ve her incelemede fazladan bir onarım turu dönüyordu.
-            String system = RUBRIC_PROMPT + rubricQuestions(items) + languageInstruction(lang);
+            // Kontrol listesi her zaman İngilizce cevaplanır, kanıt cümleleri sonda dil kapısı tarafından
+            // rapor diline çevrilir. Bir ara kanıtı doğrudan rapor dilinde istedik (bir çeviri atlaması
+            // eksilsin diye); ölçüm aynı belgenin Türkçe raporunda 2, İngilizce raporunda 6 madde
+            // bulundugunu gosterdi — cikti dili var/yok kararini degistiriyor, prompta yazmak yetmiyor.
+            String system = RUBRIC_PROMPT + rubricQuestions(items) + languageInstruction(Lang.EN);
             Map<String, Object> schema = rubricSchema(items);
             // Uzun belgede her parça ayrı oylanır ve hepsi aynı anda başlar; madde herhangi bir parçada
             // çoğunlukla "var" çıkarsa bulgu olur. Sürekliliğe ilişkin not 80. sayfadaysa da yakalanır.

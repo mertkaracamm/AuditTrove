@@ -41,13 +41,22 @@ public class PdfTextExtractor {
     public static ExtractResult fromPages(Map<Integer, PageText> pages, int totalPages) {
         if (pages == null || pages.isEmpty()) return null;
         StringBuilder sb = new StringBuilder();
+        int included = 0;
+        boolean truncated = pages.size() < totalPages;
         for (Map.Entry<Integer, PageText> entry : new TreeMap<>(pages).entrySet()) {
-            sb.append("\n\n[REPORT PAGE ").append(entry.getKey()).append("]\n");
-            for (PageText.Line line : entry.getValue().lines()) sb.append(line.text()).append('\n');
+            StringBuilder block = new StringBuilder("\n\n[REPORT PAGE ").append(entry.getKey()).append("]\n");
+            for (PageText.Line line : entry.getValue().lines()) block.append(line.text()).append('\n');
+            // Cok buyuk belgede bellek/sure korumasi; asilan sayfalar rapora "kismi inceleme" olarak yansir.
+            if (sb.length() + block.length() > HARD_CAP_CHARS && included > 0) {
+                truncated = true;
+                break;
+            }
+            sb.append(block);
+            included++;
         }
         String text = sb.toString().trim();
         if (text.length() < MIN_CHARS) return null;
-        return new ExtractResult(text, totalPages, pages.size(), pages.size() < totalPages);
+        return new ExtractResult(text, totalPages, included, truncated);
     }
 
     /** Metin katmanı yoksa null döner. */

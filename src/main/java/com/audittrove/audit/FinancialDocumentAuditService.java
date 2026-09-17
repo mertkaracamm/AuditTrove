@@ -25,18 +25,15 @@ import java.util.Map;
 @Service
 public class FinancialDocumentAuditService {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(FinancialDocumentAuditService.class);
-    private final PdfTextExtractor pdfTextExtractor;
     private final OcrPageReader ocrPageReader;
     private final RegulationRetriever regulationRetriever;
     private final AuditLlmClient llmClient;
     private final long maxPdfBytes;
 
-    public FinancialDocumentAuditService(PdfTextExtractor pdfTextExtractor,
-                                         OcrPageReader ocrPageReader,
+    public FinancialDocumentAuditService(OcrPageReader ocrPageReader,
                                          RegulationRetriever regulationRetriever,
                                          AuditLlmClient llmClient,
                                          @Value("${audittrove.max-pdf-bytes:15728640}") long maxPdfBytes) {
-        this.pdfTextExtractor = pdfTextExtractor;
         this.ocrPageReader = ocrPageReader;
         this.regulationRetriever = regulationRetriever;
         this.llmClient = llmClient;
@@ -137,8 +134,12 @@ public class FinancialDocumentAuditService {
     private AuditResponse runAudit(String filename, byte[] content, String language, String documentType) {
         validate(filename, content);
         try {
+            // Metin de satir konumlari da TEK kaynaktan okunur. Once iki ayri cikarim vardi
+            // (inceleme PDFTextStripper'i, cipalar PdfGeometry'yi) ve tablo basliklari ikisinde farkli
+            // siraya giriyordu: modelin gordugu cumle cipa tarafinda bulunamayip bulgu sayfada
+            // isaretlenemiyordu. Tek kaynak bu sinifi tamamen ortadan kaldiriyor.
             Map<Integer, PageText> pages = PdfGeometry.read(content);
-            PdfTextExtractor.ExtractResult extracted = pdfTextExtractor.extractOrNull(content);
+            PdfTextExtractor.ExtractResult extracted = PdfTextExtractor.fromPages(pages, pages.size());
             if (extracted == null) {
                 // Metin katmani yok: taranmis ya da telefonla cekilmis belge. Metin de satir konumlari da
                 // OCR'dan gelir; ikisi ayni kaynak oldugu icin bulgular sayfada yine isaretlenebilir.

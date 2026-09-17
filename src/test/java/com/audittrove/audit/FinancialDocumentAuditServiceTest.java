@@ -2,7 +2,6 @@ package com.audittrove.audit;
 
 import com.audittrove.llm.AuditLlmClient;
 import com.audittrove.pdf.OcrPageReader;
-import com.audittrove.pdf.PdfTextExtractor;
 import com.audittrove.rag.RegulationRetriever;
 import org.junit.jupiter.api.Test;
 
@@ -11,7 +10,7 @@ import static org.mockito.Mockito.mock;
 
 class FinancialDocumentAuditServiceTest {
     private final FinancialDocumentAuditService service = new FinancialDocumentAuditService(
-            mock(PdfTextExtractor.class), mock(OcrPageReader.class), mock(RegulationRetriever.class),
+            mock(OcrPageReader.class), mock(RegulationRetriever.class),
             mock(AuditLlmClient.class), 1024);
 
     @Test
