@@ -1,0 +1,18 @@
+{
+ "jsonrpc": "2.0",
+ "id": 1,
+ "method": "tools/call",
+ "params": {
+  "name": "audit_document",
+  "arguments": {
+   "pageTexts": [
+    {
+     "page": 1,
+     "text": "DANIŞMANLIK HİZMETİ SÖZLEŞMESİ\nYürürlük Tarihi: 1 Nisan 2026 · Süre: 6 ay\nHizmet VerenDeniz Aksoy (bağımsız\ndanışman)Hizmet AlanAltınyol Lojistik\nA.Ş.\nKonuDepo süreçlerinin gözden\ngeçirilmesiAylık Ücret62.000,00 TL +\nKDV\nMadde 1 - Hizmetin Kapsamı\n1.1. Danışman, hizmet alanın İstanbul ve Kocaeli depolarındaki mal kabul ve sevkiyat\nsüreçlerini inceler , ayda bir yazılı rapor sunar .\n1.2. Çalışma ayda en az altı iş günü yerinde yapılır; kalan çalışma uzaktan yürütülür .\nMadde 2 - Ücret ve Ödeme\n2.1. Aylık ücret, ilgili ayı takip eden ayın ilk beş iş günü içinde danışmanın bildirdiği hesaba\nödenir .\n2.2. Y ol ve konaklama giderleri belgelendirilmek kaydıyla hizmet alan tarafından karşılanır .\nMadde 3 - Süre ve Fesih\n3.1. Sözleşme 6 ay sürelidir ve süre sonunda kendiliğinden sona erer .\n3.2. Hizmet alan, sözleşmeyi süre bitiminden önce, gerekçe göstermeksizin ve tazminat\nödemeksizin tek taraﬂı olarak feshedebilir . Fesih, 15 gün önceden yazılı bildirimle yapılır .\n3.3. F esih hâlinde o ana kadar tamamlanmış çalışmanın ücreti ödenir .\nMadde 4 - Gizlilik\n4.1. Danışman, hizmet sırasında öğrendiği bilgileri üçüncü kişilerle paylaşmaz.\nMadde 5 - Diğer Hükümler\n5.1. Uyuşmazlıklarda İstanbul mahkemeleri yetkilidir .\n5.2. Sözleşme iki nüsha düzenlenmiştir .\nHizmet Veren\nDeniz AksoyHizmet Alan\nAltınyol Lojistik A.Ş.\nÖrnek belgedir · kurgusal taraﬂar ve tutarlar"
+    }
+   ],
+   "language": "tr",
+   "documentType": "general"
+  }
+ }
+}

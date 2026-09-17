@@ -999,6 +999,24 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
 
     // Aynı konuyu anlatan iki bulgu olmasın: LLM'in serbest bulgusu motor/rubrik bulgusuyla kelime
     // bazında yeterince örtüşüyorsa atlanır (başlık ve kanıttaki 5+ harfli kelimelerin ortak oranı).
+    /**
+     * Ek gözlem, listedeki bir bulguyla belgenin AYNI cümlesine dayanıyor mu. `overlapsAny` bulgu
+     * metinlerinin kelimelerine bakıyor ve Türkçe çekim ekleri yüzünden kaçırıyor ("tazminat
+     * ödemeksizin" ile "tazminat ödemeden" aynı hükmü anlatıyor ama kelimeler tutmuyor). Alıntı
+     * belgenin kendi cümlesi olduğu için orada böyle bir sorun yok: biri diğerini kapsıyorsa
+     * aynı maddedir ve kullanıcı aynı hükmü iki başlıkla iki kez görmemeli.
+     */
+    static boolean sameClauseAsAny(AuditResponse.Risk candidate, List<AuditResponse.Risk> existing) {
+        String mine = QuoteMatch.flatten(candidate.quote());
+        if (!QuoteMatch.searchable(mine)) return false;
+        for (AuditResponse.Risk other : existing) {
+            String theirs = QuoteMatch.flatten(other.quote());
+            if (!QuoteMatch.searchable(theirs)) continue;
+            if (mine.contains(theirs) || theirs.contains(mine)) return true;
+        }
+        return false;
+    }
+
     private static boolean overlapsAny(AuditResponse.Risk candidate, List<AuditResponse.Risk> existing) {
         Set<String> a = contentWords(candidate);
         if (a.isEmpty()) return false;
@@ -1100,6 +1118,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             for (AuditResponse.Risk r : response.risks()) {
                 if (FinancialRuleEngine.coveredByRules(r, rules.covered())) continue;
                 if (overlapsAny(r, combined)) continue;
+                if (sameClauseAsAny(r, combined)) continue;
                 if (!rubric.isEmpty() && extras >= MAX_MODEL_FINDINGS) break;
                 combined.add(new AuditResponse.Risk(r.title(), r.severity(), r.finding(), r.evidence(), r.pages(),
                         AuditResponse.Risk.MODEL, r.quote()));
