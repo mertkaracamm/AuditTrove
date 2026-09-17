@@ -819,6 +819,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 out.add(new AuditResponse.Risk(item.title(lang), item.severity(), best.evidence().trim(),
                         best.evidence().trim(), pages, AuditResponse.Risk.RUBRIC, best.quote() == null ? "" : best.quote().trim()));
             }
+            out = dropRepeatedQuotes(out);
             log.info("Kontrol listesi: tur={} parca={} bulgu={}", kind, chunks.size(), out.size());
             return out;
         } catch (RubricUnavailableException e) {
@@ -857,6 +858,34 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             return List.of();
         }
         return votes;
+    }
+
+    /**
+     * Aynı cümleye dayanan kontrol listesi bulgularından yalnızca en ağırı kalır. Birden çok madde
+     * aynı hükmü yakalayabiliyor ("cezai şart" ile "sorumluluk sınırlaması" aynı gizlilik cümlesini
+     * gösteriyordu); kullanıcı aynı cümleyi farklı başlıklarla birkaç kez görüyor ve sayfada aynı yer
+     * üst üste boyanıyordu. Alıntısı olmayan bulgu elemeye girmez, onlar ayırt edilemez.
+     */
+    static List<AuditResponse.Risk> dropRepeatedQuotes(List<AuditResponse.Risk> risks) {
+        if (risks == null || risks.size() < 2) return risks == null ? List.of() : risks;
+        Map<String, AuditResponse.Risk> strongest = new LinkedHashMap<>();
+        List<AuditResponse.Risk> out = new ArrayList<>();
+        for (AuditResponse.Risk risk : risks) {
+            String key = QuoteMatch.flatten(risk.quote());
+            if (!QuoteMatch.searchable(key)) {
+                out.add(risk);
+                continue;
+            }
+            AuditResponse.Risk seen = strongest.get(key);
+            if (seen == null || severityRank(risk.severity()) > severityRank(seen.severity())) {
+                strongest.put(key, risk);
+            }
+        }
+        out.addAll(strongest.values());
+        // Sıra bozulmasın: girdi sırası korunur.
+        List<AuditResponse.Risk> ordered = new ArrayList<>();
+        for (AuditResponse.Risk risk : risks) if (out.contains(risk)) ordered.add(risk);
+        return ordered;
     }
 
     private static RubricAnswer answerFor(RubricResult r, RubricItem item) {
@@ -974,7 +1003,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // ===== /KONTROL LİSTESİ =====
 
 
-    private int severityRank(String severity) {
+    private static int severityRank(String severity) {
         if (severity == null) return 0;
         return switch (severity.toUpperCase()) {
             case "CRITICAL" -> 4;
