@@ -6,6 +6,9 @@ COPY src src
 RUN mvn -q clean package
 
 FROM eclipse-temurin:17-jre-alpine
+# Taranmis (metin katmani olmayan) PDF'ler icin OCR. Turkce dil verisi ayri paket; onsuz
+# Turkce karakterler bozuk okunuyor ("Yurirliik" / "Yururluk").
+RUN apk add --no-cache tesseract-ocr tesseract-ocr-data-tur tesseract-ocr-data-eng
 RUN addgroup -S audittrove && adduser -S audittrove -G audittrove
 WORKDIR /app
 COPY --from=build /workspace/target/audittrove.jar app.jar

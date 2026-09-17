@@ -5,6 +5,7 @@ import com.audittrove.llm.AuditLlmClient;
 import com.audittrove.pdf.EvidenceLocator;
 import com.audittrove.pdf.PageText;
 import com.audittrove.pdf.PdfGeometry;
+import com.audittrove.pdf.OcrPageReader;
 import com.audittrove.pdf.PdfTextExtractor;
 import com.audittrove.rag.RegulationChunk;
 import com.audittrove.rag.RegulationRetriever;
@@ -25,15 +26,18 @@ import java.util.Map;
 public class FinancialDocumentAuditService {
     private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(FinancialDocumentAuditService.class);
     private final PdfTextExtractor pdfTextExtractor;
+    private final OcrPageReader ocrPageReader;
     private final RegulationRetriever regulationRetriever;
     private final AuditLlmClient llmClient;
     private final long maxPdfBytes;
 
     public FinancialDocumentAuditService(PdfTextExtractor pdfTextExtractor,
+                                         OcrPageReader ocrPageReader,
                                          RegulationRetriever regulationRetriever,
                                          AuditLlmClient llmClient,
                                          @Value("${audittrove.max-pdf-bytes:15728640}") long maxPdfBytes) {
         this.pdfTextExtractor = pdfTextExtractor;
+        this.ocrPageReader = ocrPageReader;
         this.regulationRetriever = regulationRetriever;
         this.llmClient = llmClient;
         this.maxPdfBytes = maxPdfBytes;
@@ -133,12 +137,22 @@ public class FinancialDocumentAuditService {
     private AuditResponse runAudit(String filename, byte[] content, String language, String documentType) {
         validate(filename, content);
         try {
-            PdfTextExtractor.ExtractResult extracted = pdfTextExtractor.extractDetailed(content);
+            Map<Integer, PageText> pages = PdfGeometry.read(content);
+            PdfTextExtractor.ExtractResult extracted = pdfTextExtractor.extractOrNull(content);
+            if (extracted == null) {
+                // Metin katmani yok: taranmis ya da telefonla cekilmis belge. Metin de satir konumlari da
+                // OCR'dan gelir; ikisi ayni kaynak oldugu icin bulgular sayfada yine isaretlenebilir.
+                pages = ocrPageReader.read(content);
+                extracted = PdfTextExtractor.fromPages(pages, pageCount(content));
+            }
+            if (extracted == null) {
+                throw new InvalidDocumentException("PDF içinde analiz edilebilir metin bulunamadı");
+            }
             // Belgeler kendi iceriklerine gore degerlendirilir; RAG korpusu aktif degil.
             List<RegulationChunk> context = List.of();
             AuditResponse response = llmClient.audit(extracted.text(), context, language, documentType,
                     extracted.truncated(), extracted.totalPages(), extracted.includedPages());
-            return anchorEvidence(response, content);
+            return anchorEvidence(response, pages);
         } catch (IOException exception) {
             throw new InvalidDocumentException("PDF okunamadı", exception);
         }
@@ -146,9 +160,15 @@ public class FinancialDocumentAuditService {
 
     // Bulgu kanıtlarının sayfa üzerindeki yerleri: görüntüleyici bunları boyar. Konum bulunamazsa rapor
     // aynen döner; bu adım hiçbir zaman incelemeyi düşürmez.
-    private AuditResponse anchorEvidence(AuditResponse response, byte[] content) {
+    private static int pageCount(byte[] content) throws IOException {
+        try (org.apache.pdfbox.pdmodel.PDDocument document = org.apache.pdfbox.Loader.loadPDF(content)) {
+            return document.getNumberOfPages();
+        }
+    }
+
+    private AuditResponse anchorEvidence(AuditResponse response, Map<Integer, PageText> pages) {
         try {
-            Map<Integer, PageText> pages = PdfGeometry.read(content);
+            if (pages == null || pages.isEmpty()) return response;
             AuditResponse anchored = EvidenceLocator.annotate(response, pages);
             // Sayfa metinleri de yanıtla iner: soru-cevap için cihaz bunları saklar, sunucu belge tutmaz.
             List<AuditResponse.PageContent> texts = new ArrayList<>();
