@@ -40,7 +40,7 @@ class McpContractTest {
                 List.of("Yasak coğrafi olarak sınırlanabilir mi?"),
                 List.of());
         when(auditService.auditText(any(), any(), anyString(), anyString())).thenReturn(sample);
-        when(auditService.audit(anyString(), any(byte[].class), anyString(), anyString())).thenReturn(sample);
+        when(auditService.auditWithoutOcr(anyString(), any(byte[].class), anyString(), anyString())).thenReturn(sample);
     }
 
     private JsonNode call(String json) throws Exception {
@@ -68,7 +68,7 @@ class McpContractTest {
                  "language":"tr","documentType":"rental"}}}""");
         assertThat(response.path("result").path("structuredContent").path("riskScore").asInt()).isEqualTo(42);
         verify(auditService).auditText(anyString(), eq(List.of()), eq("tr"), eq("rental"));
-        verify(auditService, never()).audit(anyString(), any(byte[].class), anyString(), anyString());
+        verify(auditService, never()).auditWithoutOcr(anyString(), any(byte[].class), anyString(), anyString());
     }
 
     @Test
@@ -84,12 +84,29 @@ class McpContractTest {
                 .containsExactly(1, 2);
     }
 
+    /** Bayt yolu MCP'de OCR'siz calisir: istemcinin cagri suresi sinirli, taranmis belge o sinira sigmiyor. */
     @Test
     void base64StillWorksForClientsThatSendBytes() throws Exception {
         String pdf = java.util.Base64.getEncoder().encodeToString("%PDF-1.4 sahte".getBytes());
         call("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"audit_document\","
                 + "\"arguments\":{\"filename\":\"a.pdf\",\"pdfBase64\":\"" + pdf + "\"}}}");
-        verify(auditService).audit(eq("a.pdf"), any(byte[].class), eq("en"), eq("general"));
+        verify(auditService).auditWithoutOcr(eq("a.pdf"), any(byte[].class), eq("en"), eq("general"));
+        verify(auditService, never()).audit(anyString(), any(byte[].class), anyString(), anyString());
+    }
+
+    /** Metin katmani olmayan belgede zaman asimina birakmak yerine ne yapilmasi gerektigi soylenir. */
+    @Test
+    void aScannedPdfAsksTheClientForTextInsteadOfTimingOut() throws Exception {
+        when(auditService.auditWithoutOcr(anyString(), any(byte[].class), anyString(), anyString()))
+                .thenThrow(new InvalidDocumentException(
+                        "This PDF has no text layer (it is a scan or a photo). Extract the text yourself "
+                                + "and send it as pageTexts or documentText."));
+        String pdf = java.util.Base64.getEncoder().encodeToString("%PDF-1.4 tarama".getBytes());
+        JsonNode response = call("{\"jsonrpc\":\"2.0\",\"id\":12,\"method\":\"tools/call\",\"params\":"
+                + "{\"name\":\"audit_document\",\"arguments\":{\"filename\":\"a.pdf\",\"pdfBase64\":\""
+                + pdf + "\"}}}");
+        assertThat(response.path("error").path("code").asInt()).isEqualTo(-32602);
+        assertThat(response.path("error").path("message").asText()).contains("pageTexts");
     }
 
     @Test
