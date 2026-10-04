@@ -4,6 +4,11 @@ import com.audittrove.audit.AuditJob;
 import com.audittrove.audit.AuditJobService;
 import com.audittrove.audit.AuditJobStore;
 import com.audittrove.audit.FinancialDocumentAuditService;
+import com.audittrove.chat.ChatRequest;
+import com.audittrove.chat.ChatResponse;
+import com.audittrove.chat.ReportChatService;
+import com.audittrove.diff.DiffResponse;
+import com.audittrove.diff.DocumentDiffService;
 import com.audittrove.security.MobileAuthFilter;
 import com.audittrove.security.QuotaService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -15,6 +20,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -31,15 +37,56 @@ public class AuditController {
     private final QuotaService quotaService;
     private final AuditJobService jobService;
     private final AuditJobStore jobStore;
+    private final ReportChatService chatService;
+    private final DocumentDiffService diffService;
 
     public AuditController(FinancialDocumentAuditService auditService,
                            QuotaService quotaService,
                            AuditJobService jobService,
-                           AuditJobStore jobStore) {
+                           AuditJobStore jobStore,
+                           ReportChatService chatService,
+                           DocumentDiffService diffService) {
         this.auditService = auditService;
         this.quotaService = quotaService;
         this.jobService = jobService;
         this.jobStore = jobStore;
+        this.chatService = chatService;
+        this.diffService = diffService;
+    }
+
+    // --- İki sürümü karşılaştır: senkron, durumsuz. Dosyalar işlenir, saklanmaz ---
+    @PostMapping(value = "/audit/diff", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @Operation(summary = "İki belge sürümü arasındaki farkları listeler (eski → yeni)")
+    public DiffResponse diff(@RequestParam("oldFile") MultipartFile oldFile,
+                             @RequestParam("newFile") MultipartFile newFile,
+                             @RequestParam(value = "language", required = false) String language) throws IOException {
+        return diffService.diff(oldFile.getBytes(), newFile.getBytes(), language);
+    }
+
+    /** Aynı iş, JSON gövdeyle: dosyalar base64. Mobil, çok dosyalı multipart gönderemediği durumda bunu kullanır. */
+    public record DiffJsonRequest(String oldFile, String newFile, String language) {}
+
+    @PostMapping(value = "/audit/diff", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @Operation(summary = "İki belge sürümü arasındaki farkları listeler (base64 JSON gövde)")
+    public DiffResponse diffJson(@RequestBody DiffJsonRequest request) {
+        if (request == null || request.oldFile() == null || request.newFile() == null) {
+            throw new com.audittrove.audit.InvalidDocumentException("İki PDF de gerekli");
+        }
+        byte[] oldPdf, newPdf;
+        try {
+            oldPdf = java.util.Base64.getDecoder().decode(request.oldFile());
+            newPdf = java.util.Base64.getDecoder().decode(request.newFile());
+        } catch (IllegalArgumentException e) {
+            throw new com.audittrove.audit.InvalidDocumentException("Dosya içeriği okunamadı");
+        }
+        return diffService.diff(oldPdf, newPdf, request.language());
+    }
+
+    // --- Rapora soru sor: durumsuz. Cihaz soruyu, raporu ve sayfa metinlerini gönderir; sunucu hiçbir şey saklamaz ---
+    @PostMapping(value = "/audit/chat", consumes = MediaType.APPLICATION_JSON_VALUE)
+    @Operation(summary = "İncelenen belge hakkında soru cevaplar (durumsuz; rapor ve sayfa metni istekle gelir)")
+    public ChatResponse chat(@RequestBody ChatRequest request) {
+        return chatService.answer(request);
     }
 
     // --- Senkron (kucuk belgeler + geriye uyumluluk; eski istemciler bunu kullanir) ---
@@ -112,6 +159,7 @@ public class AuditController {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
         }
         job.setCancelled(true);
+        jobStore.update(job);
         return ResponseEntity.ok().build();
     }
 }

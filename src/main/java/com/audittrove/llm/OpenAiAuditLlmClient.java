@@ -1,7 +1,19 @@
 package com.audittrove.llm;
 
 import com.audittrove.api.AuditResponse;
+import com.audittrove.financial.FinancialRuleEngine;
+import com.audittrove.financial.Lang;
+import com.audittrove.financial.LineItemKey;
+import com.audittrove.financial.NumberText;
+import com.audittrove.financial.StatementExtraction;
+import com.audittrove.financial.StatementVerifier;
 import com.audittrove.rag.RegulationChunk;
+import com.audittrove.report.LanguageCheck;
+import com.audittrove.report.PageRefs;
+import com.audittrove.report.QuoteMatch;
+import com.audittrove.report.ReportGate;
+import com.audittrove.report.RubricItem;
+import com.audittrove.report.SummaryGate;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
@@ -16,6 +28,7 @@ import org.springframework.web.client.ResourceAccessException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -30,6 +43,12 @@ import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 public class OpenAiAuditLlmClient implements AuditLlmClient {
@@ -78,10 +97,21 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             the discrepancy in the evidence. Never copy OCR artifacts into titles, keyMetrics labels
             or values. If a figure or date cannot be read reliably, omit it or state that it could
             not be read reliably instead of guessing a value.
-            scoreRationale: one sentence explaining what drove the risk score, naming the main positive and negative signals.
+            Keep the output compact: at most 4 findings (the most material ones), finding text of at most
+            2 sentences, evidence of 1 sentence, at most 3 recommendations. Brevity is part of quality.
+            Each finding also carries quote: the exact words from the document the evidence rests on, copied
+            verbatim in the document's own language (never translated or paraphrased), at most 15 words;
+            "" if the finding rests on a table row rather than a sentence.
+            summary: 3 to 4 sentences. EVERY sentence must be verifiable against the document: it must
+            either quote a figure, percentage or proper name exactly as printed in the document, or
+            restate one of your findings. Do not write general or unsupported statements (e.g. "cash
+            flows are positive") unless the sentence carries the exact figure that proves it.
+            scoreRationale: one short sentence on what drove the risk score.
             keyMetrics: 3 to 5 key facts from the document (amounts, dates, durations, rates) with label,
-            value exactly as written in the document, and a short note (empty string if none). Only include
-            facts explicitly present in the document.
+            value (the number or date ONLY, exactly as printed, no unit or currency inside it), unit (the
+            scale and currency or symbol that belongs to the value, e.g. "thousand TL", "million EUR", "%",
+            "months"; empty string for dates and plain counts) and a short note (empty string if none).
+            Only include facts explicitly present in the document.
             advisorQuestions: 3 short questions the reader should ask a qualified professional or the other
             party before acting on this document, derived from the findings.
             Sadece istenen JSON şemasına uygun yanıt ver.
@@ -201,12 +231,65 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private final String apiKey;
     private final String model;
 
+    // Coklu model capraz kontrol altyapisi
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OpenAiAuditLlmClient.class);
+    private final List<SecondaryBackend> secondaryBackends;
+    private final boolean multiModelEnabled;
+    // Tüm LLM çağrıları ağ beklemesidir; sabit havuz iç içe bekleyen görevlerde kilitlenebilir.
+    // Bu yüzden ikincil oylar, parçalar ve yan işler sınırsız havuzda koşar; eşzamanlılığı parça sayısı belirler.
+    private final ExecutorService crossCheckExecutor = com.audittrove.audit.CancelScope.inherit(Executors.newCachedThreadPool());
+    private final ExecutorService fanOutExecutor = com.audittrove.audit.CancelScope.inherit(Executors.newCachedThreadPool());
+    // Çıkarım ve kontrol listesi ana incelemeye paralel koşar; hiçbiri diğerinin sonucuna bağlı değil.
+    private final ExecutorService sideTaskExecutor = com.audittrove.audit.CancelScope.inherit(Executors.newCachedThreadPool());
+    // Ek gözlemler skora girmez; birincil bittikten sonra ikincillere bu kadar beklenir.
+    private static final int CROSS_GRACE_SECONDS = 10;
+    // Aynı anda açık OpenAI çağrısı sayısı sınırlı: uzun belgede parçalar aynı anda başlarsa dakikalık
+    // token limiti aşılıyor ve 429 yağıyor. Sıra beklemek, işi düşürmekten iyidir.
+    // Adil sıra: ilk gelen ilk alır; yoksa 10 kişilik yığılmada sonuncu 30 saniyede, ilk 2,5 dakikada bitiyor.
+    private final Semaphore openAiSlots = new Semaphore(Integer.parseInt(System.getenv().getOrDefault("OPENAI_MAX_CONCURRENT", "4")), true);
+    // İkincil sağlayıcı başına eşzamanlı çağrı sınırı. Oylar kritik yolda; sınır dar olursa yığılmada
+    // her inceleme oy sırası bekler ve süre üçe katlanır. Sağlayıcının kademesine göre ortamdan ayarlanır.
+    private final int secondaryMaxConcurrent = Integer.parseInt(System.getenv().getOrDefault("SECONDARY_MAX_CONCURRENT", "8"));
+    private final Map<String, Semaphore> secondarySlots = new ConcurrentHashMap<>();
+
+    // İkincil model çağrısı: eşzamanlılık sınırı + geçici hatada (429/5xx/ağ) üç deneme. Oy kaybolursa
+    // çoğunluk eşiği kayar ve aynı belge farklı bulgu verir; o yüzden oy düşürmemek için uğraşılır.
+    private String secondaryCall(SecondaryBackend b, String system, String user) {
+        com.audittrove.audit.CancelScope.check();
+        Semaphore slot = secondarySlots.computeIfAbsent(b.name(), k -> new Semaphore(secondaryMaxConcurrent, true));
+        long backoffMs = 3000;
+        RuntimeException last = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                slot.acquire();
+                try {
+                    return b.completeJson(system, user);
+                } finally {
+                    slot.release();
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(ie);
+            } catch (HttpClientErrorException e) {
+                if (e.getStatusCode().value() != 429) throw e;
+                last = e;
+            } catch (HttpServerErrorException | ResourceAccessException e) {
+                last = e;
+            }
+            if (attempt < 3) { sleepQuietly(backoffMs); backoffMs *= 2; com.audittrove.audit.CancelScope.check(); }
+        }
+        throw last;
+    }
+    private volatile String schemaJsonCache;
+
     public OpenAiAuditLlmClient(ObjectMapper objectMapper,
                                 RestClient.Builder builder,
                                 @Value("${audittrove.openai.api-key:}") String apiKey,
                                 @Value("${audittrove.openai.base-url}") String baseUrl,
                                 @Value("${audittrove.openai.model}") String model,
-                                @Value("${audittrove.openai.timeout-seconds:90}") int timeoutSeconds) {
+                                @Value("${audittrove.openai.timeout-seconds:90}") int timeoutSeconds,
+                                List<SecondaryBackend> secondaryBackends,
+                                @Value("${AUDITTROVE_MULTI_MODEL:false}") boolean multiModelEnabled) {
         this.objectMapper = objectMapper;
         this.apiKey = apiKey;
         this.model = model;
@@ -214,6 +297,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         requestFactory.setConnectTimeout(Duration.ofSeconds(10));
         requestFactory.setReadTimeout(Duration.ofSeconds(timeoutSeconds));
         this.restClient = builder.baseUrl(baseUrl).requestFactory(requestFactory).build();
+        this.secondaryBackends = secondaryBackends;
+        this.multiModelEnabled = multiModelEnabled;
     }
 
     @Override
@@ -222,18 +307,57 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         if (apiKey.isBlank()) {
             throw new LlmUnavailableException("OPENAI_API_KEY yapılandırılmamış");
         }
+        // Rapor dili burada bir kez çözülür; aşağıdaki hiçbir katman ham string'e bakmaz.
+        Lang lang = Lang.of(language);
         // Belge tek bir cagriya sigmiyorsa parcalara bolup birlestir (chunking).
         List<String> chunks = splitIntoChunks(documentText);
         if (chunks.size() > 1) {
-            return auditChunked(chunks, context, language, documentType, totalPages, includedPages, truncated);
+            return auditChunked(chunks, context, lang, documentType, totalPages, includedPages, truncated);
         }
-        AuditResponse single = auditSingle(documentText, context, language, documentType);
-        return postProcess(single, context, documentText, language, false, totalPages, includedPages);
+        SideTasks side = startSideTasks(documentText, lang, documentType);
+        AuditResponse single = auditSingleCross(documentText, context, lang, documentType);
+        return postProcess(single, context, documentText, lang, documentType, false, totalPages, includedPages, side);
+    }
+
+    // Belge metnine bağlı yan işler (gelir tablosu çıkarımı, kontrol listesi) ana inceleme sürerken çalışır.
+    private record SideTasks(CompletableFuture<StatementExtraction> extraction,
+                             CompletableFuture<List<AuditResponse.Risk>> rubric) {}
+
+    private SideTasks startSideTasks(String documentText, Lang lang, String documentType) {
+        return new SideTasks(
+                CompletableFuture.supplyAsync(() -> extractStatement(documentText), sideTaskExecutor),
+                CompletableFuture.supplyAsync(() -> rubricFindings(documentText, lang, documentType), sideTaskExecutor));
+    }
+
+    // Kontrol listesi skorun yarısıdır: ilk deneme başarısızsa bir kez daha denenir, o da olmazsa
+    // inceleme hata verir. Listesiz "temiz" rapor üretmek, hata vermekten kötüdür.
+    private List<AuditResponse.Risk> awaitRubric(CompletableFuture<List<AuditResponse.Risk>> f,
+                                                 String documentText, Lang lang, String documentType) {
+        try {
+            return f.get(120, TimeUnit.SECONDS);
+        } catch (Exception first) {
+            log.warn("Kontrol listesi ilk denemede alinamadi ({}), tekrar deneniyor", first.toString());
+        }
+        try {
+            return rubricFindings(documentText, lang, documentType);
+        } catch (Exception second) {
+            log.error("Kontrol listesi ikinci denemede de alinamadi: {}", second.toString());
+            throw new LlmUnavailableException("Kontrol listesi tamamlanamadı; inceleme tekrar denenmeli");
+        }
+    }
+
+    private static <T> T await(CompletableFuture<T> f, T fallback, String what) {
+        try {
+            return f.get(90, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            log.warn("{} zamaninda gelmedi, atlaniyor: {}", what, e.toString());
+            return fallback;
+        }
     }
 
     // Tek bir metin blogunu tek LLM cagrisiyla degerlendirir (post-process yapmaz).
     private AuditResponse auditSingle(String documentText, List<RegulationChunk> context,
-                                      String language, String documentType) {
+                                      Lang lang, String documentType) {
         Map<String, Object> body = Map.of(
                 "model", model,
                 "temperature", 0,
@@ -245,7 +369,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                                 "strict", true,
                                 "schema", responseSchema())),
                 "messages", List.of(
-                        Map.of("role", "system", "content", SYSTEM_PROMPT + typeInstruction(documentType) + languageInstruction(language)),
+                        Map.of("role", "system", "content", SYSTEM_PROMPT + typeInstruction(documentType) + languageInstruction(lang)),
                         Map.of("role", "user", "content", userPrompt(documentText, context))));
         try {
             JsonNode response = postToLlmWithRetry(body);
@@ -261,28 +385,43 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
     }
 
-    // OpenAI cagrisini gecici hatalara karsi tekrar dener. Uzun belgede ~19 ardisik cagri
-    // yapildigindan, tek bir gecici hata (429 rate limit / 5xx / timeout) tum isi cokertmesin.
-    // Kalici hatalar (4xx, 429 disi) hemen firlatilir.
+    // OpenAI çağrısı: eşzamanlılık sınırı içinde, geçici hatada (429 / 5xx / ağ) beş deneme.
+    // Kalıcı hatalar (429 dışı 4xx) hemen fırlatılır.
     private JsonNode postToLlmWithRetry(Map<String, Object> body) {
-        int maxAttempts = 3;
-        long backoffMs = 2000;
+        // Kullanıcı vazgeçtiyse yeni çağrı yapılmaz; süren çağrı biter ama arkası gelmez.
+        com.audittrove.audit.CancelScope.check();
+        int maxAttempts = 5;
+        long backoffMs = 3000;
         RuntimeException last = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
-                return restClient.post()
-                        .uri("/v1/chat/completions")
-                        .header("Authorization", "Bearer " + apiKey)
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .body(body)
-                        .retrieve()
-                        .body(JsonNode.class);
+                openAiSlots.acquire();
+                try {
+                    return restClient.post()
+                            .uri("/v1/chat/completions")
+                            .header("Authorization", "Bearer " + apiKey)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .body(body)
+                            .retrieve()
+                            .body(JsonNode.class);
+                } finally {
+                    openAiSlots.release();
+                }
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException(ie);
             } catch (HttpClientErrorException e) {
-                // Yalnizca 429 (rate limit) tekrar denenir; diger 4xx kalicidir
+                // Yalnızca 429 (dakikalık limit) tekrar denenir; sunucu süre söylediyse ona uyulur.
                 if (e.getStatusCode().value() == 429 && attempt < maxAttempts) {
                     last = e;
-                    sleepQuietly(backoffMs);
-                    backoffMs *= 2;
+                    long wait = backoffMs;
+                    String retryAfter = e.getResponseHeaders() == null ? null : e.getResponseHeaders().getFirst("Retry-After");
+                    if (retryAfter != null) {
+                        try { wait = Math.max(1000, (long) (Double.parseDouble(retryAfter.trim()) * 1000)); } catch (NumberFormatException ignored) { }
+                    }
+                    log.warn("OpenAI 429, {} ms sonra tekrar ({}/{})", wait, attempt, maxAttempts);
+                    sleepQuietly(Math.min(wait, 60_000));
+                    backoffMs = Math.min(backoffMs * 2, 30_000);
                     continue;
                 }
                 throw e;
@@ -311,7 +450,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // Uzun belge: her parcayi ayri degerlendir, bulgu/gosterge/sorulari birlestir,
     // ozeti tum parca ozetlerinden sentezle. Sayfa dogrulama tum belge metnine karsi yapilir.
     private AuditResponse auditChunked(List<String> chunks, List<RegulationChunk> context,
-                                       String language, String documentType, int totalPages,
+                                       Lang lang, String documentType, int totalPages,
                                        int includedPages, boolean truncated) {
         List<AuditResponse.Risk> allRisks = new ArrayList<>();
         List<String> allRecommendations = new ArrayList<>();
@@ -320,8 +459,16 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         List<String> partialSummaries = new ArrayList<>();
         int maxScore = 0;
 
+        // Yan işler ve tüm parçalar aynı anda başlar; süre en uzun parçanınki kadar olur, toplamı değil.
+        String fullText = String.join("", chunks);
+        SideTasks side = startSideTasks(fullText, lang, documentType);
+        List<CompletableFuture<AuditResponse>> partFutures = new ArrayList<>();
         for (String chunk : chunks) {
-            AuditResponse part = auditSingle(chunk, context, language, documentType);
+            partFutures.add(CompletableFuture.supplyAsync(
+                    () -> auditSingleCross(chunk, context, lang, documentType), fanOutExecutor));
+        }
+        for (CompletableFuture<AuditResponse> f : partFutures) {
+            AuditResponse part = f.join();
             if (part.risks() != null) allRisks.addAll(part.risks());
             if (part.recommendations() != null) allRecommendations.addAll(part.recommendations());
             if (part.keyMetrics() != null) allMetrics.addAll(part.keyMetrics());
@@ -338,19 +485,18 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         List<String> mergedQuestions = allQuestions.stream().distinct().limit(4).toList();
 
         // Ozeti parca ozetlerinden tek bir sentez cagrisiyla topla
-        String summary = synthesizeSummary(partialSummaries, language, documentType);
-        String rationale = synthesizeRationale(mergedRisks, language);
+        String summary = synthesizeSummary(partialSummaries, lang, documentType);
+        String rationale = synthesizeRationale(mergedRisks, lang);
 
         AuditResponse merged = new AuditResponse(maxScore, rationale, summary,
                 mergedRisks, mergedRecs, mergedMetrics, mergedQuestions, List.of());
 
         // Butun belge metnini birlestirip sayfa dogrulama + skor kelepcesi + standart kilidini uygula
-        String fullText = String.join("", chunks);
-        AuditResponse processed = postProcess(merged, context, fullText, language, false, totalPages, totalPages);
+        AuditResponse processed = postProcess(merged, context, fullText, lang, documentType, false, totalPages, totalPages, side);
 
         // Cok parcali oldugunu ozete deterministik olarak not dus.
         // Belge tavani astiysa (truncated) "butunuyle" DEME — dogru sekilde kismi inceleme belirt.
-        boolean turkish = "tr".equalsIgnoreCase(language);
+        boolean turkish = lang.isTurkish();
         String note;
         if (truncated) {
             note = turkish
@@ -368,7 +514,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return new AuditResponse(processed.riskScore(), processed.scoreRationale(),
                 note + (processed.summary() == null ? "" : processed.summary()),
                 processed.risks(), processed.recommendations(), processed.keyMetrics(),
-                processed.advisorQuestions(), processed.references());
+                processed.advisorQuestions(), processed.references(), processed.language(), processed.pageCount());
     }
 
     // Belgeyi [REPORT PAGE n] sinirlarinda, ~CHUNK_CHARS'lik parcalara boler.
@@ -416,8 +562,11 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     private static final Pattern DECREASE_WORD = Pattern.compile(
             "azal|d[\\u00fcu][\\u015fs]|decreas|declin|fell|lower|geriled",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    // Tutar: ya olcek/para SON EKI ile ("19.917,1 milyon TL", "4,148 thousand"),
+    // ya da para birimi ON EKI ile ("TL 4,148", "TRY 1,234.5") yazilmis olabilir (EN raporlar).
     private static final Pattern AMOUNT_SCALED = Pattern.compile(
-            "(\\d[\\d.,]*)\\s*(?:milyon|million|milyar|billion|bin|TL|\\u20ba)",
+            "(\\d[\\d.,]*)\\s*(?:milyon|million|milyar|billion|thousand|bin|TRY|TL|\\u20ba)"
+            + "|(?:TRY|TL|\\u20ba)\\s*(\\d[\\d.,]*)",
             Pattern.CASE_INSENSITIVE);
 
     private boolean contradictsDirection(AuditResponse.Risk risk) {
@@ -434,7 +583,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         Matcher m = AMOUNT_SCALED.matcher(ev);
         Double first = null, second = null;
         while (m.find()) {
-            Double v = parseAmount(m.group(1));
+            String tok = m.group(1) != null ? m.group(1) : m.group(2);
+            Double v = NumberText.parse(tok);
             if (v == null) continue;
             if (first == null) { first = v; }
             else { second = v; break; }
@@ -445,133 +595,452 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return second < first;
     }
 
-    // Turkce/Ingilizce tutari sayiya cevirir. Binlik "." ve ondalik "," (TR) ya da tam tersi (EN)
-    // olabilir; en sagdaki ayirici ondalik kabul edilir, digerleri binlik olarak atilir.
-    private static Double parseAmount(String tok) {
-        if (tok == null) return null;
-        String t = tok.trim();
-        int lastComma = t.lastIndexOf(','), lastDot = t.lastIndexOf('.');
-        int dec = Math.max(lastComma, lastDot);
+    // ===== GELİR TABLOSU: LLM OKUR, KOD KARAR VERİR =====
+    // Çıkarım yerleşimden bağımsızdır; doğrulayıcı belgede geçmeyen sayıyı geçirmez; yön ve eşik kodda hesaplanır.
+    private static final String EXTRACTION_PROMPT = """
+            You extract income statement (profit or loss statement) line items from a document.
+            You READ ONLY: never compute, convert, round, infer or reorder anything.
+            Copy every amount EXACTLY as printed, with the same digits, separators and sign
+            (keep a leading minus or surrounding parentheses if printed).
+            Decide which column is the current period from the column HEADERS (dates or years),
+            never from column position; put the header texts in periods.current / periods.previous.
+            unit: the presentation currency as an ISO code (TRY, USD, EUR...) and the declared scale
+            ("1.000 TL", "TL Thousand", "in thousands" -> thousand; "million" -> million;
+            "billion" -> billion; plain amounts -> units).
+            Prefer the consolidated statement if both consolidated and standalone exist, and the
+            full-period columns if quarterly columns also exist. Include an item only when both the
+            current and the previous period amounts are printed on the same row. For page, use the
+            number inside the nearest preceding [REPORT PAGE n] marker. If there is no income
+            statement, return found=false with empty items.
+            """;
+
+    // Belge tipine bakılmaz: gelir tablosu var mı yok mu, belgenin kendisi söyler (found=false → hiçbir şey olmaz).
+    private FinancialRuleEngine.Result financialRules(StatementExtraction extraction, Map<Integer, String> pages, Lang lang) {
+        if (pages.isEmpty() || extraction == null) return FinancialRuleEngine.Result.empty();
+        StatementVerifier.VerifiedStatement verified = StatementVerifier.verify(extraction, pages);
+        FinancialRuleEngine.Result result = FinancialRuleEngine.evaluate(verified, lang);
+        log.info("Gelir tablosu: cikarilan={} dogrulanan={} bulgu={}",
+                extraction.items().size(), verified.items().size(), result.findings().size());
+        return result;
+    }
+
+    // Belge tek çağrıya sığmıyorsa parça parça denenir; tabloyu içeren ilk parça yeterlidir.
+    // Çıkarım başarısız olursa inceleme düşmez, yalnızca kural katmanı devreye girmez.
+    // Uzun belgede parçalar aynı anda okunur; gelir tablosunu bulan ilk parça (belge sırasıyla) kazanır.
+    private StatementExtraction extractStatement(String documentText) {
+        List<CompletableFuture<StatementExtraction>> perChunk = new ArrayList<>();
+        for (String chunk : splitIntoChunks(documentText)) {
+            perChunk.add(CompletableFuture.supplyAsync(() -> extractFromChunk(chunk), fanOutExecutor));
+        }
+        for (CompletableFuture<StatementExtraction> f : perChunk) {
+            StatementExtraction extraction = f.join();
+            if (extraction.found() && !extraction.items().isEmpty()) return extraction;
+        }
+        return StatementExtraction.none();
+    }
+
+    private StatementExtraction extractFromChunk(String chunk) {
         try {
-            if (dec < 0) return Double.parseDouble(t.replaceAll("[.,]", ""));
-            String intPart = t.substring(0, dec).replaceAll("[.,]", "");
-            String frac = t.substring(dec + 1).replaceAll("[^0-9]", "");
-            return Double.parseDouble(intPart + "." + frac);
-        } catch (NumberFormatException e) {
+            Map<String, Object> body = Map.of(
+                    "model", model,
+                    "temperature", 0,
+                    "seed", 7,
+                    "response_format", Map.of(
+                            "type", "json_schema",
+                            "json_schema", Map.of(
+                                    "name", "income_statement_extraction",
+                                    "strict", true,
+                                    "schema", extractionSchema())),
+                    "messages", List.of(
+                            Map.of("role", "system", "content", EXTRACTION_PROMPT),
+                            Map.of("role", "user", "content", chunk)));
+            JsonNode response = postToLlmWithRetry(body);
+            String content = response.at("/choices/0/message/content").asText();
+            if (content.isBlank()) return StatementExtraction.none();
+            return objectMapper.readValue(content, StatementExtraction.class);
+        } catch (Exception e) {
+            log.warn("Gelir tablosu cikarimi basarisiz, kural katmani atlaniyor: {}", e.toString());
+            return StatementExtraction.none();
+        }
+    }
+
+    /**
+     * Tek çağrılık, katı şemalı JSON tamamlama. Soru-cevap gibi inceleme dışı işler için; aynı OpenAI
+     * kuyruğu ve 429 yeniden deneme mantığı kullanılır. Yanıt yoksa LlmUnavailableException.
+     */
+    public JsonNode completeJson(String schemaName, Map<String, Object> schema, String system, String user) {
+        if (apiKey.isBlank()) throw new LlmUnavailableException("OPENAI_API_KEY yapılandırılmamış");
+        try {
+            Map<String, Object> body = Map.of(
+                    "model", model,
+                    "temperature", 0,
+                    "seed", 7,
+                    "response_format", Map.of(
+                            "type", "json_schema",
+                            "json_schema", Map.of("name", schemaName, "strict", true, "schema", schema)),
+                    "messages", List.of(
+                            Map.of("role", "system", "content", system),
+                            Map.of("role", "user", "content", user)));
+            JsonNode response = postToLlmWithRetry(body);
+            String content = response.at("/choices/0/message/content").asText();
+            if (content.isBlank()) throw new LlmUnavailableException("Model boş yanıt verdi");
+            return objectMapper.readTree(content);
+        } catch (LlmUnavailableException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new LlmUnavailableException("Model yanıtı alınamadı: " + e.getMessage(), e);
+        }
+    }
+
+    private Map<String, Object> extractionSchema() {
+        List<String> keys = Arrays.stream(LineItemKey.values()).map(LineItemKey::jsonKey).toList();
+        Map<String, Object> item = Map.of(
+                "type", "object",
+                "additionalProperties", false,
+                "required", List.of("key", "label", "current", "previous", "page"),
+                "properties", Map.of(
+                        "key", Map.of("type", "string", "enum", keys),
+                        "label", Map.of("type", "string"),
+                        "current", Map.of("type", "string"),
+                        "previous", Map.of("type", "string"),
+                        "page", Map.of("type", "integer")));
+        Map<String, Object> unit = Map.of(
+                "type", List.of("object", "null"),
+                "additionalProperties", false,
+                "required", List.of("currency", "scale"),
+                "properties", Map.of(
+                        "currency", Map.of("type", "string"),
+                        "scale", Map.of("type", "string", "enum", List.of("units", "thousand", "million", "billion"))));
+        Map<String, Object> periods = Map.of(
+                "type", List.of("object", "null"),
+                "additionalProperties", false,
+                "required", List.of("current", "previous"),
+                "properties", Map.of(
+                        "current", Map.of("type", "string"),
+                        "previous", Map.of("type", "string")));
+        return Map.of(
+                "type", "object",
+                "additionalProperties", false,
+                "required", List.of("found", "unit", "periods", "items"),
+                "properties", Map.of(
+                        "found", Map.of("type", "boolean"),
+                        "unit", unit,
+                        "periods", periods,
+                        "items", Map.of("type", "array", "items", item)));
+    }
+    // ===== /GELİR TABLOSU =====
+
+    // ===== KONTROL LİSTESİ (RUBRİK) =====
+    // LLM'e "riskleri bul" denmez; belge tipine göre sabit sorulara var/yok + kanıt ister. Başlık ve
+    // önem kodda sabit olduğu için aynı belge aynı bulgu setini ve aynı bandı verir.
+    private static final int MAX_MODEL_FINDINGS = 2;
+    private static final String RUBRIC_PROMPT = """
+            You are answering a fixed checklist about a document. Also state the document kind.
+            For EVERY checklist item answer present=true only if the document itself explicitly
+            supports it; otherwise present=false. Never infer from general knowledge.
+            For present items give ONE short evidence sentence written in the OUTPUT LANGUAGE given below,
+            paraphrasing the document (translate if the document is in another language; do not quote
+            verbatim in a different language), keeping numbers, dates, currency and note references exactly
+            as printed, and the number inside the nearest preceding [REPORT PAGE n] marker as page.
+            For present items also give quote: the exact words from the document the answer rests on, copied
+            verbatim in the document's own language (do not translate, do not paraphrase), at most 15 words.
+            For absent items evidence and quote are "" and page 0.
+            """;
+
+    private record RubricAnswer(String id, boolean present, String evidence, String quote, int page) {}
+    private record RubricResult(String documentKind, List<RubricAnswer> answers) {}
+
+    // Birincil model cevaplar; ikincil modeller aynı soruları oylar. Bir madde ancak çoğunluk "var"
+    // dediyse bulgu olur — sınırdaki maddelerin koşudan koşuya değişmesini oylama söndürür.
+    private List<AuditResponse.Risk> rubricFindings(String documentText, Lang lang, String documentType) {
+        try {
+            List<String> chunks = splitIntoChunks(documentText);
+            if (chunks.isEmpty()) return List.of();
+            // Tür: kısa sınıflandırma (üç model oyu) her zaman koşar. Kullanıcı tür seçtiyse onun soruları
+            // sorulur; sınıflandırma başka bir tür diyorsa o türün soruları da eklenir. Yanlış seçilen tür
+            // ("kira" seçili unutulmuş iş sözleşmesi) böylece temiz rapora değil, birkaç ek soruya mal olur.
+            RubricItem.Kind picked = kindFromDocumentType(documentType);
+            RubricItem.Kind detected = classifyKind(chunks.get(0));
+            RubricItem.Kind kind = picked != null ? picked : detected;
+            List<RubricItem> items = new ArrayList<>(RubricItem.forKind(kind));
+            if (picked != null && detected != picked && detected != RubricItem.Kind.GENERAL && detected != RubricItem.Kind.OTHER) {
+                log.warn("Belge turu uyusmuyor: secilen={} algilanan={} — iki turun sorulari birlikte soruluyor", picked, detected);
+                items.addAll(RubricItem.forKind(detected));
+            }
+            // Genel sorular türden bağımsız her belgeye sorulur; türe özel soru aynı maddeyi
+            // soruyorsa genel olan atlanır.
+            items = new ArrayList<>(RubricItem.withGeneral(kind, items));
+            if (items.isEmpty()) return List.of();
+            // Kontrol listesi her zaman İngilizce cevaplanır, kanıt cümleleri sonda dil kapısı tarafından
+            // rapor diline çevrilir. Bir ara kanıtı doğrudan rapor dilinde istedik (bir çeviri atlaması
+            // eksilsin diye); ölçüm aynı belgenin Türkçe raporunda 2, İngilizce raporunda 6 madde
+            // bulundugunu gosterdi — cikti dili var/yok kararini degistiriyor, prompta yazmak yetmiyor.
+            String system = RUBRIC_PROMPT + rubricQuestions(items) + languageInstruction(Lang.EN);
+            Map<String, Object> schema = rubricSchema(items);
+            // Uzun belgede her parça ayrı oylanır ve hepsi aynı anda başlar; madde herhangi bir parçada
+            // çoğunlukla "var" çıkarsa bulgu olur. Sürekliliğe ilişkin not 80. sayfadaysa da yakalanır.
+            List<CompletableFuture<List<RubricResult>>> perChunk = new ArrayList<>();
+            for (String chunk : chunks) {
+                perChunk.add(CompletableFuture.supplyAsync(() -> rubricVotes(system, schema, chunk), fanOutExecutor));
+            }
+            List<List<RubricResult>> votesByChunk = new ArrayList<>();
+            for (CompletableFuture<List<RubricResult>> f : perChunk) votesByChunk.add(f.get());
+            // Herhangi bir parçanın birincil cevabı yoksa liste eksiktir; eksik listeyle skor üretilmez.
+            for (List<RubricResult> votes : votesByChunk) {
+                if (votes.isEmpty()) throw new RubricUnavailableException("Kontrol listesi birincil cevabi alinamadi", null);
+            }
+
+            List<AuditResponse.Risk> out = new ArrayList<>();
+            for (RubricItem item : items) {
+                RubricAnswer best = null;
+                for (List<RubricResult> votes : votesByChunk) {
+                    // Çoğunluk için iki oy gerekir; üç oy geldiyse 2/3, iki geldiyse ikisi de. Eşik gelen oy
+                    // sayısına göre bire düşmez, yoksa bir oyun kaybı bulgu setini değiştirirdi. Tek oy kaldıysa o karar verir.
+                    int needed = Math.min(2, votes.size());
+                    int yes = 0;
+                    RubricAnswer first = null;
+                    for (RubricResult vote : votes) {
+                        RubricAnswer a = answerFor(vote, item);
+                        if (a == null || !a.present() || a.evidence() == null || a.evidence().isBlank()) continue;
+                        yes++;
+                        if (first == null) first = a; // kanıt öncelikle birincilden
+                    }
+                    // Sınırda kalan madde (eşiği tam tutturan ya da bir oyla kaçıran) loga düşsün:
+                    // aynı belgenin farklı rapor almasının kaynağı bu maddeler, hangileri olduğunu görelim.
+                    if (votes.size() > 1 && (yes == needed || yes == needed - 1)) {
+                        log.warn("Kontrol listesi sinirda: {} — {}/{} oy", item.id(), yes, votes.size());
+                    }
+                    if (yes >= needed && first != null) { best = first; break; }
+                }
+                if (best == null) continue;
+                List<Integer> pages = best.page() > 0 ? List.of(best.page()) : List.of();
+                out.add(new AuditResponse.Risk(item.title(lang), item.severity(), best.evidence().trim(),
+                        best.evidence().trim(), pages, AuditResponse.Risk.RUBRIC, best.quote() == null ? "" : best.quote().trim()));
+            }
+            out = dropRepeatedQuotes(out);
+            log.info("Kontrol listesi: tur={} parca={} bulgu={}", kind, chunks.size(), out.size());
+            return out;
+        } catch (RubricUnavailableException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RubricUnavailableException("Kontrol listesi calismadi: " + e, e);
+        }
+    }
+
+    // Kontrol listesi olmadan skor hesaplanamaz: listesiz rapor "temiz" görünür, bu yanlış rapordur.
+    // Bu yüzden liste alınamazsa inceleme hata verir, 95 basmaz.
+    static final class RubricUnavailableException extends RuntimeException {
+        RubricUnavailableException(String message, Throwable cause) { super(message, cause); }
+    }
+
+    // Kontrol listesi kararını yalnızca birincil model verir. Birincil temperature 0 ve sabit seed ile
+    // çağrıldığı için aynı belge her zaman aynı cevabı alıyor; ikincil modellerin oyu sağlayıcı tarafında
+    // oynadığından sınırda kalan madde koşudan koşuya gelip gidiyordu ve madde yüksek önemliyse skor band
+    // atlıyordu. İkincil modeller çapraz kontrolde ve belge türü oylamasında çalışmaya devam ediyor.
+    // Birincil cevap veremezse parça oysuz kalır (boş liste) ve inceleme hata verir; listesiz rapor
+    // "temiz" görünür, bu yanlış rapordur.
+    // Kontrol listesi ayni modele UC kez, farkli seed'lerle sorulur ve cogunluk alinir. Tek ornekte
+    // terse belgelerde (etiket-deger satirlarindan ibaret formlar) ayni belge kosudan kosuya 1 ile 6
+    // arasi bulgu veriyordu: temperature 0 ve sabit seed garanti degil, model sinirdaki maddede fikir
+    // degistiriyor. Uc ornek sinirdaki maddeyi sondurur. Ornekler ayni anda gider, sure degismez.
+    private static final int[] RUBRIC_SEEDS = {7, 17, 27};
+
+    private List<RubricResult> rubricVotes(String system, Map<String, Object> schema, String chunk) {
+        List<CompletableFuture<RubricResult>> samples = new ArrayList<>();
+        for (int seed : RUBRIC_SEEDS) {
+            samples.add(CompletableFuture.supplyAsync(
+                    () -> rubricSample(system, schema, chunk, seed), fanOutExecutor));
+        }
+        List<RubricResult> votes = new ArrayList<>();
+        for (CompletableFuture<RubricResult> sample : samples) {
+            RubricResult result = sample.join();
+            if (result != null) votes.add(result);
+        }
+        // Hicbir ornek cevap vermediyse parca oysuz kalir; listesiz rapor "temiz" gorunur, o yuzden
+        // cagiran bunu hata olarak ele alir.
+        if (votes.isEmpty()) log.warn("Kontrol listesi hicbir ornekte cevap vermedi");
+        return votes;
+    }
+
+    private RubricResult rubricSample(String system, Map<String, Object> schema, String chunk, int seed) {
+        try {
+            Map<String, Object> body = Map.of(
+                    "model", model, "temperature", 0, "seed", seed,
+                    "response_format", Map.of("type", "json_schema", "json_schema",
+                            Map.of("name", "checklist", "strict", true, "schema", schema)),
+                    "messages", List.of(
+                            Map.of("role", "system", "content", system),
+                            Map.of("role", "user", "content", chunk)));
+            JsonNode response = postToLlmWithRetry(body);
+            return objectMapper.readValue(response.at("/choices/0/message/content").asText(), RubricResult.class);
+        } catch (Exception e) {
+            log.warn("Kontrol listesi ornegi (seed {}) alinamadi: {}", seed, e.toString());
             return null;
         }
     }
 
-    // ===== DETERMINISTIK FINANSAL BULGU MOTORU =====
-    // Finansal raporun kar/zarar tablosunu KODLA parse eder ve bulgulari LLM'e biraktirmadan
-    // TUTARLARDAN uretir. Boylece ayni belge her dilde, her calistirmada BIREBIR AYNI bulgu
-    // setini verir. Tablo parse edilemezse bos doner (LLM bulgulari korunur).
-    // Kurallar: kar kalemi (esas faaliyet kari / donem kari) >=%20 DUSTUYSE bulgu;
-    // gider kalemi (pazarlama, genel yonetim, finansman) >=%20 ARTTIYSA bulgu.
-    // Yon her zaman iki tutardan hesaplanir (yazidan/yuzde isaretinden degil): azalan gider
-    // veya artan kar bulgu DEGILDIR.
-    private static final double FINDING_THRESHOLD = 20.0;
-
-    private record LineItem(String label, boolean profit, String trName, String enName) {}
-    private static final List<LineItem> PL_ITEMS = List.of(
-            new LineItem("Esas Faaliyet Kar\u0131", true,  "Esas faaliyet k\u00e2r\u0131", "Operating profit"),
-            new LineItem("D\u00f6nem Kar\u0131", true,      "D\u00f6nem k\u00e2r\u0131", "Net income"),
-            new LineItem("Pazarlama ve sat\u0131\u015f giderleri", false, "Pazarlama ve sat\u0131\u015f giderleri", "Marketing and sales expenses"),
-            new LineItem("Pazarlama giderleri", false, "Pazarlama giderleri", "Marketing expenses"),
-            new LineItem("Genel y\u00f6netim giderleri", false, "Genel y\u00f6netim giderleri", "General administrative expenses"),
-            new LineItem("Finansman giderleri", false, "Finansman giderleri", "Finance expenses"));
-
-    private List<AuditResponse.Risk> deterministicFinancialFindings(String documentText, String language) {
+    /**
+     * Aynı cümleye dayanan kontrol listesi bulgularından yalnızca en ağırı kalır. Birden çok madde
+     * aynı hükmü yakalayabiliyor ("cezai şart" ile "sorumluluk sınırlaması" aynı gizlilik cümlesini
+     * gösteriyordu); kullanıcı aynı cümleyi farklı başlıklarla birkaç kez görüyor ve sayfada aynı yer
+     * üst üste boyanıyordu. Alıntısı olmayan bulgu elemeye girmez, onlar ayırt edilemez.
+     */
+    static List<AuditResponse.Risk> dropRepeatedQuotes(List<AuditResponse.Risk> risks) {
+        if (risks == null || risks.size() < 2) return risks == null ? List.of() : risks;
+        Map<String, AuditResponse.Risk> strongest = new LinkedHashMap<>();
         List<AuditResponse.Risk> out = new ArrayList<>();
-        if (documentText == null) return out;
-        // Secilen standardin bolgesi: iki standart varsa belgede ONCE geleni sec, aksi halde tum metin.
-        Matcher th = TMS_HEADER.matcher(documentText);
-        Matcher ih = IFRS_HEADER.matcher(documentText);
-        boolean hasTms = th.find(), hasIfrs = ih.find();
-        String region;
-        if (hasTms && hasIfrs) {
-            int a = Math.min(th.start(), ih.start());
-            int b = Math.max(th.start(), ih.start());
-            region = documentText.substring(a, b);
-        } else {
-            region = documentText;
-        }
-        boolean en = "en".equalsIgnoreCase(language);
-        java.util.Set<String> seen = new LinkedHashSet<>();
-        for (LineItem it : PL_ITEMS) {
-            Matcher m = Pattern.compile("(?m)^\\s*" + Pattern.quote(it.label())
-                    + "\\s+\\(?([\\d.]+,\\d+)\\)?\\s+\\(?([\\d.]+,\\d+)\\)?").matcher(region);
-            if (!m.find()) continue;
-            Double prev = plNum(m.group(1)), cur = plNum(m.group(2));
-            if (prev == null || cur == null || prev == 0) continue;
-            String key = en ? it.enName() : it.trName();
-            if (!seen.add(key)) continue; // ayni kalem iki etiketle eslesirse tek kez
-            double change = (cur - prev) / Math.abs(prev) * 100.0;
-            boolean down = cur < prev;
-            if (it.profit() && down && Math.abs(change) >= FINDING_THRESHOLD) {
-                out.add(profitFinding(it, prev, cur, Math.abs(change), en));
-            } else if (!it.profit() && !down && change >= FINDING_THRESHOLD) {
-                out.add(expenseFinding(it, prev, cur, change, en));
+        for (AuditResponse.Risk risk : risks) {
+            String key = QuoteMatch.flatten(risk.quote());
+            if (!QuoteMatch.searchable(key)) {
+                out.add(risk);
+                continue;
+            }
+            AuditResponse.Risk seen = strongest.get(key);
+            if (seen == null || severityRank(risk.severity()) > severityRank(seen.severity())) {
+                strongest.put(key, risk);
             }
         }
+        out.addAll(strongest.values());
+        // Sıra bozulmasın: girdi sırası korunur.
+        List<AuditResponse.Risk> ordered = new ArrayList<>();
+        for (AuditResponse.Risk risk : risks) if (out.contains(risk)) ordered.add(risk);
+        return ordered;
+    }
+
+    private static RubricAnswer answerFor(RubricResult r, RubricItem item) {
+        if (r == null || r.answers() == null) return null;
+        for (RubricAnswer a : r.answers()) if (RubricItem.fromId(a.id()) == item) return a;
+        return null;
+    }
+
+    private static RubricItem.Kind kindFromDocumentType(String documentType) {
+        if (documentType == null) return null;
+        return switch (documentType.trim().toLowerCase(Locale.ROOT)) {
+            case "financial" -> RubricItem.Kind.FINANCIAL;
+            case "rental" -> RubricItem.Kind.RENTAL;
+            case "employment" -> RubricItem.Kind.EMPLOYMENT;
+            case "subscription" -> RubricItem.Kind.SUBSCRIPTION;
+            case "insurance" -> RubricItem.Kind.INSURANCE;
+            case "vehicle" -> RubricItem.Kind.VEHICLE;
+            default -> null; // "general" ya da bilinmeyen: belgenin kendisi söylesin
+        };
+    }
+
+    // Sınıflandırma: tek kelimelik cevap, üç model aynı anda; çoğunluk, eşitlikte birincil.
+    // Cevap kısa olduğu için çağrı saniyelerle ölçülür; 45 soruyu boşa cevaplatmaktan çok ucuz.
+    private static final String CLASSIFY_PROMPT = """
+            Classify the document into exactly one kind. Kinds: financial (financial statements, annual or
+            interim report, audit report), rental (lease or tenancy agreement), employment (employment or
+            service contract), subscription (subscription, membership or recurring-service agreement),
+            insurance (insurance policy or certificate), vehicle (vehicle sale, purchase or loan agreement),
+            general (any other contract, offer, notice or document). Answer with the kind only.
+            """;
+
+    // Belge turunu yalnizca birincil model secer. Burada da uc model oyluyordu ve oy zipliyordu:
+    // ayni belge bir kosuda GENERAL (1-2), digerinde EMPLOYMENT (2-1) cikip farkli soru setini
+    // aliyordu, bulgu seti ve skor onunla birlikte degisiyordu. Tur yanlis secilse bile genel
+    // sorular her belgeye soruldugu icin taban kaybolmuyor, sadece ture ozel sorular kaciyor.
+    private RubricItem.Kind classifyKind(String chunk) {
+        List<String> kinds = Arrays.stream(RubricItem.Kind.values())
+                .filter(k -> k != RubricItem.Kind.OTHER)
+                .map(k -> k.name().toLowerCase(Locale.ROOT)).toList();
+        Map<String, Object> schema = Map.of(
+                "type", "object", "additionalProperties", false,
+                "required", List.of("kind"),
+                "properties", Map.of("kind", Map.of("type", "string", "enum", kinds)));
+        RubricItem.Kind kind = RubricItem.Kind.GENERAL;
+        try {
+            Map<String, Object> body = Map.of(
+                    "model", model, "temperature", 0, "seed", 7,
+                    "response_format", Map.of("type", "json_schema", "json_schema",
+                            Map.of("name", "document_kind", "strict", true, "schema", schema)),
+                    "messages", List.of(
+                            Map.of("role", "system", "content", CLASSIFY_PROMPT),
+                            Map.of("role", "user", "content", chunk)));
+            JsonNode response = postToLlmWithRetry(body);
+            JsonNode out = objectMapper.readTree(response.at("/choices/0/message/content").asText());
+            kind = RubricItem.kindOf(out.path("kind").asText());
+        } catch (Exception e) {
+            log.warn("Belge turu siniflandirilamadi, genel liste kullaniliyor: {}", e.toString());
+        }
+        if (kind == RubricItem.Kind.OTHER) kind = RubricItem.Kind.GENERAL;
+        log.info("Belge turu: {}", kind);
+        return kind;
+    }
+
+    private String rubricQuestions(List<RubricItem> items) {
+        StringBuilder sb = new StringBuilder("\nChecklist items (id — question):\n");
+        for (RubricItem r : items) {
+            sb.append("- ").append(r.id()).append(" — ").append(r.question()).append("\n");
+        }
+        return sb.toString();
+    }
+
+    private Map<String, Object> rubricSchema(List<RubricItem> items) {
+        List<String> ids = items.stream().map(RubricItem::id).toList();
+        List<String> kinds = Arrays.stream(RubricItem.Kind.values()).map(k -> k.name().toLowerCase(Locale.ROOT)).toList();
+        Map<String, Object> answer = Map.of(
+                "type", "object", "additionalProperties", false,
+                "required", List.of("id", "present", "evidence", "quote", "page"),
+                "properties", Map.of(
+                        "id", Map.of("type", "string", "enum", ids),
+                        "present", Map.of("type", "boolean"),
+                        "evidence", Map.of("type", "string"),
+                        "quote", Map.of("type", "string", "description",
+                                "Verbatim excerpt copied from the document, in the document's own language. Never translate."),
+                        "page", Map.of("type", "integer")));
+        return Map.of(
+                "type", "object", "additionalProperties", false,
+                "required", List.of("documentKind", "answers"),
+                "properties", Map.of(
+                        "documentKind", Map.of("type", "string", "enum", kinds),
+                        "answers", Map.of("type", "array", "items", answer)));
+    }
+
+    // Aynı konuyu anlatan iki bulgu olmasın: LLM'in serbest bulgusu motor/rubrik bulgusuyla kelime
+    // bazında yeterince örtüşüyorsa atlanır (başlık ve kanıttaki 5+ harfli kelimelerin ortak oranı).
+    /**
+     * Ek gözlem, listedeki bir bulguyla belgenin AYNI cümlesine dayanıyor mu. `overlapsAny` bulgu
+     * metinlerinin kelimelerine bakıyor ve Türkçe çekim ekleri yüzünden kaçırıyor ("tazminat
+     * ödemeksizin" ile "tazminat ödemeden" aynı hükmü anlatıyor ama kelimeler tutmuyor). Alıntı
+     * belgenin kendi cümlesi olduğu için orada böyle bir sorun yok: biri diğerini kapsıyorsa
+     * aynı maddedir ve kullanıcı aynı hükmü iki başlıkla iki kez görmemeli.
+     */
+    static boolean sameClauseAsAny(AuditResponse.Risk candidate, List<AuditResponse.Risk> existing) {
+        String mine = QuoteMatch.flatten(candidate.quote());
+        if (!QuoteMatch.searchable(mine)) return false;
+        for (AuditResponse.Risk other : existing) {
+            String theirs = QuoteMatch.flatten(other.quote());
+            if (!QuoteMatch.searchable(theirs)) continue;
+            if (mine.contains(theirs) || theirs.contains(mine)) return true;
+        }
+        return false;
+    }
+
+    private static boolean overlapsAny(AuditResponse.Risk candidate, List<AuditResponse.Risk> existing) {
+        Set<String> a = contentWords(candidate);
+        if (a.isEmpty()) return false;
+        for (AuditResponse.Risk e : existing) {
+            Set<String> b = contentWords(e);
+            if (b.isEmpty()) continue;
+            long common = a.stream().filter(b::contains).count();
+            if (common >= 3 && common * 2 >= Math.min(a.size(), b.size())) return true;
+        }
+        return false;
+    }
+
+    private static Set<String> contentWords(AuditResponse.Risk r) {
+        Set<String> out = new HashSet<>();
+        String text = ((r.title() == null ? "" : r.title()) + " " + (r.evidence() == null ? "" : r.evidence()))
+                .toLowerCase(Locale.forLanguageTag("tr"));
+        Matcher m = Pattern.compile("\\p{L}{5,}").matcher(text);
+        while (m.find()) out.add(m.group());
         return out;
     }
+    // ===== /KONTROL LİSTESİ =====
 
-    private AuditResponse.Risk profitFinding(LineItem it, double prev, double cur, double pct, boolean en) {
-        String name = en ? it.enName() : it.trName();
-        String title = en ? name + " declined by " + fmtPct(pct, true)
-                          : name + " " + fmtPct(pct, false) + " oran\u0131nda d\u00fc\u015ft\u00fc";
-        String ev = en
-                ? name + " fell from " + fmtNum(prev, true) + " million TL to " + fmtNum(cur, true)
-                  + " million TL, a " + fmtPct(pct, true) + " decrease."
-                : name + " " + fmtNum(prev, false) + " milyon TL'den " + fmtNum(cur, false)
-                  + " milyon TL'ye " + fmtPct(pct, false) + " oran\u0131nda d\u00fc\u015fm\u00fc\u015ft\u00fcr.";
-        return new AuditResponse.Risk(title, "MEDIUM", ev, ev);
-    }
 
-    private AuditResponse.Risk expenseFinding(LineItem it, double prev, double cur, double pct, boolean en) {
-        String name = en ? it.enName() : it.trName();
-        String title = en ? name + " increased by " + fmtPct(pct, true)
-                          : name + " " + fmtPct(pct, false) + " oran\u0131nda artt\u0131";
-        String ev = en
-                ? name + " increased from " + fmtNum(prev, true) + " million TL to " + fmtNum(cur, true)
-                  + " million TL, a " + fmtPct(pct, true) + " increase."
-                : name + " " + fmtNum(prev, false) + " milyon TL'den " + fmtNum(cur, false)
-                  + " milyon TL'ye " + fmtPct(pct, false) + " oran\u0131nda artm\u0131\u015ft\u0131r.";
-        return new AuditResponse.Risk(title, "MEDIUM", ev, ev);
-    }
-
-    private static Double plNum(String s) {
-        if (s == null) return null;
-        String t = s.replace("(", "").replace(")", "").replace(".", "").replace(",", ".");
-        try { return Double.parseDouble(t); } catch (NumberFormatException e) { return null; }
-    }
-
-    // Sayiyi dile gore bicimlendirir. EN: binlik ',' ondalik '.'  TR: binlik '.' ondalik ','
-    private static String fmtNum(double v, boolean en) {
-        long whole = (long) Math.floor(Math.abs(v));
-        int frac = (int) Math.round((Math.abs(v) - whole) * 10);
-        if (frac == 10) { whole += 1; frac = 0; }
-        String grp = String.format(en ? "%,d" : "%,d", whole);
-        if (en) {
-            grp = String.format("%,d", whole); // 26,211
-        } else {
-            grp = String.format("%,d", whole).replace(",", "."); // 26.211
-        }
-        String dec = en ? "." : ",";
-        return grp + dec + frac;
-    }
-
-    private static String fmtPct(double p, boolean en) {
-        double r = Math.round(p * 10) / 10.0;
-        long whole = (long) r;
-        int frac = (int) Math.round((r - whole) * 10);
-        String num = (en ? whole + "." + frac : whole + "," + frac);
-        return en ? num + "%" : "%" + num;
-    }
-    // ===== /DETERMINISTIK FINANSAL BULGU MOTORU =====
-
-    private int severityRank(String severity) {
+    private static int severityRank(String severity) {
         if (severity == null) return 0;
         return switch (severity.toUpperCase()) {
             case "CRITICAL" -> 4;
@@ -596,10 +1065,10 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return out;
     }
 
-    private String synthesizeSummary(List<String> partialSummaries, String language, String documentType) {
+    private String synthesizeSummary(List<String> partialSummaries, Lang lang, String documentType) {
         if (partialSummaries.isEmpty()) return "";
         if (partialSummaries.size() == 1) return partialSummaries.get(0);
-        boolean turkish = "tr".equalsIgnoreCase(language);
+        boolean turkish = lang.isTurkish();
         String instruction = turkish
             ? "Aşağıda bir belgenin farklı bölümlerine ait özetler var. Bunları TEK, tutarlı bir yönetici özetinde birleştir. Yalnızca özet metnini döndür, başka bir şey ekleme."
             : "Below are summaries of different sections of one document. Merge them into ONE coherent executive summary. Return only the summary text, nothing else.";
@@ -620,8 +1089,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         }
     }
 
-    private String synthesizeRationale(List<AuditResponse.Risk> risks, String language) {
-        boolean turkish = "tr".equalsIgnoreCase(language);
+    private String synthesizeRationale(List<AuditResponse.Risk> risks, Lang lang) {
+        boolean turkish = lang.isTurkish();
         long high = risks.stream().filter(r -> severityRank(r.severity()) >= 3).count();
         long mid = risks.stream().filter(r -> severityRank(r.severity()) == 2).count();
         if (turkish) {
@@ -632,15 +1101,31 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     }
 
     private AuditResponse postProcess(AuditResponse response, List<RegulationChunk> context,
-                                      String documentText, String language,
-                                      boolean truncated, int totalPages, int includedPages) {
-        // 0) Deterministik finansal bulgu motoru: kar/zarar tablosu parse edilebiliyorsa
-        //    bulgulari KODLA uret (LLM'e biraktirma). Ayni belge -> her dilde birebir ayni
-        //    bulgu seti -> ayni skor. Parse edilemezse (finansal degilse) LLM bulgulari kalir.
-        List<AuditResponse.Risk> deterministic = deterministicFinancialFindings(documentText, language);
-        if (!deterministic.isEmpty()) {
+                                      String documentText, Lang lang, String documentType,
+                                      boolean truncated, int totalPages, int includedPages, SideTasks side) {
+        Map<Integer, String> pages = splitPages(documentText);
+        // 0) Gelir tablosu kalemleri: LLM okur, kod karar verir. Kodun cevap verdiği kalem hakkında
+        //    LLM'in yazdığı serbest bulgu düşer; kalan LLM bulguları (yoğunlaşma, riskten korunma vb.) kalır.
+        FinancialRuleEngine.Result rules = financialRules(
+                await(side.extraction(), StatementExtraction.none(), "Gelir tablosu cikarimi"), pages, lang);
+        // 0b) Kontrol listesi: belge tipine göre sabit sorular, sabit başlık ve önem. Skoru motor + rubrik
+        //     belirler; LLM'in serbest bulguları "model" kaynaklı ek gözlem olarak kalır, en fazla iki tane.
+        List<AuditResponse.Risk> rubric = awaitRubric(side.rubric(), documentText, lang, documentType);
+        {
+            List<AuditResponse.Risk> combined = new ArrayList<>(rules.findings());
+            combined.addAll(rubric);
+            int extras = 0;
+            for (AuditResponse.Risk r : response.risks()) {
+                if (FinancialRuleEngine.coveredByRules(r, rules.covered())) continue;
+                if (overlapsAny(r, combined)) continue;
+                if (sameClauseAsAny(r, combined)) continue;
+                if (!rubric.isEmpty() && extras >= MAX_MODEL_FINDINGS) break;
+                combined.add(new AuditResponse.Risk(r.title(), r.severity(), r.finding(), r.evidence(), r.pages(),
+                        AuditResponse.Risk.MODEL, r.quote()));
+                extras++;
+            }
             response = new AuditResponse(response.riskScore(), response.scoreRationale(),
-                    response.summary(), deterministic, response.recommendations(),
+                    response.summary(), combined, response.recommendations(),
                     response.keyMetrics(), response.advisorQuestions(), response.references());
         }
         // 1) Mevzuat referansları (yalnizca RAG baglami varsa filtrele/uret)
@@ -656,11 +1141,8 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                         .toList();
             }
         }
-        // 2) Sayfa dogrulama: kanit rakamlarini [REPORT PAGE n] bloklarinda ara,
-        //    model ne derse desin referansi gercek sayfayla degistir
-        Map<Integer, String> pages = splitPages(documentText);
-        boolean turkish = "tr".equalsIgnoreCase(language);
-        String pageWord = turkish ? "Sayfa" : "Page";
+        // 2) Sayfa doğrulama: kanıttaki sayılar hangi sayfada geçiyorsa bulgu o sayfaya bağlanır.
+        //    Sayfa bilgisi metinden sökülür ve yapısal `pages` alanına yazılır; metne atıf yazılmaz.
         // Standart kilidi (deterministik): ozet hangi standardi sectiyse, sadece diger
         // standardin bolgesinde gecen rakamlari tasiyan bulgular elenir.
         AccountingLock lock = buildAccountingLock(documentText, response.summary());
@@ -673,44 +1155,55 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             if (contradictsDirection(risk)) {
                 continue; // "artis" diyor ama rakamlar dususu gosteriyor — yanlis yonlu bulgu, cikar
             }
-            List<Integer> found = groundPages(risk.evidence(), pages);
+            PageRefs.Parsed ev = PageRefs.strip(risk.evidence());
+            PageRefs.Parsed fi = PageRefs.strip(risk.finding());
+            // Alıntı belgeden kelimesi kelimesine alındığı için sayfayı en iyi o söyler. Modelin
+            // bildirdiği sayfa uzun raporlarda şaşıyor; bulgu o zaman yanlış sayfaya bağlanıyor ve
+            // belge üzerinde işaretlenemiyordu.
+            List<Integer> quoteHits = pagesOfQuote(risk.quote(), pages);
+            // Kontrol listesi bulgusunun alıntısı belgenin hiçbir yerinde geçmiyorsa bulgu rapora
+            // girmez: model belgede olmayan bir cümle yazabiliyor ve tıklanınca gidecek yeri olmuyor.
+            // Alıntının birden fazla yerde geçmesi bunun dışında — ek bölümlü sözleşmelerde aynı madde
+            // tekrar tekrar yazılıyor, o belgelerde bütün kontrol listesi bulguları düşüyordu.
+            if (quoteHits.isEmpty() && risk.isRubric() && QuoteMatch.verifiable(risk.quote())) {
+                log.warn("Kontrol listesi alintisi belgede bulunamadi, dusuruldu: {}", risk.title());
+                continue;
+            }
+            SortedSet<Integer> claimedPages = new TreeSet<>(risk.pages());
+            claimedPages.addAll(ev.pages());
+            claimedPages.addAll(fi.pages());
+            List<Integer> found = pageFromQuoteHits(quoteHits, claimedPages);
             if (found.isEmpty()) {
-                // Rakamdan sayfa bulunamadi. Ama model kanit sonuna ciplak [REPORT PAGE n]
-                // birakmis olabilir (ozellikle rakamsiz metinlerde). O sayfayi kullan;
-                // yalnizca belgede GERCEKTEN var olan sayfalari kabul et (uydurma sayfayi ele).
-                Matcher pm = PAGE_MARKER.matcher(risk.evidence());
-                SortedSet<Integer> markerPages = new TreeSet<>();
-                while (pm.find()) {
-                    try { markerPages.add(Integer.parseInt(pm.group(1))); } catch (NumberFormatException ignore) {}
-                }
-                markerPages.retainAll(pages.keySet());
-                if (!markerPages.isEmpty()) {
-                    found = new ArrayList<>(markerPages);
-                } else {
-                    // Hic gecerli sayfa yok: ciplak isaretci kullaniciya SIZMASIN diye temizle
-                    String cleaned = MARKER_IN_TEXT.matcher(risk.evidence()).replaceAll(" ")
-                            .replaceAll("\\s{2,}", " ").trim();
-                    groundedRisks.add(new AuditResponse.Risk(risk.title(), risk.severity(), risk.finding(), cleaned));
-                    continue;
-                }
+                found = groundPages(ev.text(), pages);
+            }
+            if (found.isEmpty()) {
+                // Sayıdan sayfa bulunamadı: modelin yazdığı ya da motorun koyduğu atıfa güven,
+                // ama yalnızca belgede gerçekten var olan sayfalar kabul edilir.
+                SortedSet<Integer> claimed = new TreeSet<>(risk.pages());
+                claimed.addAll(ev.pages());
+                claimed.addAll(fi.pages());
+                claimed.retainAll(pages.keySet());
+                found = new ArrayList<>(claimed);
+            }
+            // Sayfası bulunamayan ek gözlem rapora girmez: kullanıcıya "her bulgu geldiği sayfada
+            // işaretli" diyoruz, tıklanınca gidecek yeri olmayan satır bu sözü bozar. Kontrol
+            // listesi ve motor bulguları zaten sayfalarını kendileri getirir.
+            if (found.isEmpty() && risk.isModel()) {
+                log.warn("Ek gozlem sayfaya baglanamadi, dusuruldu: {}", risk.title());
+                continue;
+            }
+            AuditResponse.Risk gated = ReportGate.gateRisk(
+                    new AuditResponse.Risk(risk.title(), risk.severity(), fi.text(), ev.text(), found, risk.source(), risk.quote()));
+            if (gated == null) {
+                log.warn("Bulgu kanit kapisindan gecemedi, dusuruldu: {}", risk.title());
+                continue;
             }
             allPages.addAll(found);
-            String pageList = found.stream().map(String::valueOf).collect(Collectors.joining(", "));
-            String replacement = "(" + pageWord + " " + pageList + ")";
-            // Once modelin sizdirdigi ciplak [REPORT PAGE n] isaretcilerini temizle,
-            // sonra parantezli atifi gercek sayfayla degistir. Boylece "[REPORT PAGE 11] (Sayfa 11)"
-            // gibi cift/ciplak referans kullaniciya gitmez.
-            String evidence = MARKER_IN_TEXT.matcher(risk.evidence()).replaceAll(" ");
-            evidence = evidence.replaceAll("\\s{2,}", " ").trim();
-            evidence = PAGE_PAREN.matcher(evidence).replaceAll(Matcher.quoteReplacement(replacement));
-            if (!evidence.contains(replacement)) {
-                evidence = evidence.stripTrailing() + " " + replacement;
-            }
-            groundedRisks.add(new AuditResponse.Risk(risk.title(), risk.severity(), risk.finding(), evidence));
+            groundedRisks.add(gated);
         }
         // RAG kapaliyken referans listesini dogrulanmis sayfalardan uret
         if (context.isEmpty() && !allPages.isEmpty()) {
-            String prefix = turkish ? "Rapor Sayfa " : "Report Page ";
+            String prefix = lang.isTurkish() ? "Rapor Sayfa " : "Report Page ";
             references = allPages.stream()
                     .map(p -> new AuditResponse.Reference(prefix + p, "", ""))
                     .toList();
@@ -747,11 +1240,100 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                         .toList();
         // Ayni metrigin iki formatla iki kart olmasini engelle
         // (or. "3.523 milyar TL" + "TL 3,5 trilyon" ayni deger).
+        // Biçim kapısı: değer sayı, birim ayrı; cümle olan değer düşer.
+        cleanMetrics = ReportGate.gateMetrics(cleanMetrics);
         cleanMetrics = dedupeMetrics(cleanMetrics);
+        // Bulgulara uygulanan kural göstergelere de uygulanır: belgede geçmeyen sayı rapora giremez.
+        cleanMetrics = groundMetrics(cleanMetrics, pages);
 
-        return new AuditResponse(calibratedScore, rationale, summary,
-                groundedRisks, response.recommendations(), cleanMetrics,
-                questions, references);
+        // Serbest metin alanlarına sızan sayfa işaretçileri de sökülür (sayfa bilgisi bulgularda taşınır).
+        summary = PageRefs.strip(summary).text();
+        // Özetteki her cümle belgedeki bir sayıya/özel ada ya da bir bulguya dayanmalı; dayanaksız cümle çıkar.
+        // Cümle kalmazsa özet bulgulardan yazılır. Skor gerekçesi de skoru üreten bulgulardan kodda yazılır.
+        String groundedSummary = SummaryGate.ground(summary, pages, groundedRisks);
+        if (groundedSummary.length() < summary.length()) {
+            log.info("Ozet dayanak kapisi: {} karakter dayanaksiz cumle cikarildi", summary.length() - groundedSummary.length());
+        }
+        summary = groundedSummary.isBlank() ? SummaryGate.fallbackSummary(groundedRisks, lang, totalPages) : groundedSummary;
+        rationale = SummaryGate.rationale(groundedRisks, lang);
+        List<String> recommendations = response.recommendations().stream().map(r -> PageRefs.strip(r).text()).toList();
+        questions = questions == null ? null : questions.stream().map(q -> PageRefs.strip(q).text()).toList();
+
+        AuditResponse result = new AuditResponse(calibratedScore, rationale, summary,
+                groundedRisks, recommendations, cleanMetrics, questions, references, lang.code(), totalPages);
+        // Dil kapısı: yanlış dilde alan varsa önce çevrilir, hâlâ yanlışsa liste öğesi düşer.
+        List<String> mixed = LanguageCheck.mismatches(result, lang);
+        for (int attempt = 1; attempt <= 2 && !mixed.isEmpty(); attempt++) {
+            log.warn("Dil karisikligi ({} bekleniyor): {} — onarim {}/2", lang.code(), mixed, attempt);
+            result = repairLanguage(result, lang);
+            mixed = LanguageCheck.mismatches(result, lang);
+        }
+        // Bulgu düşürülmez: yanlış dilde bulgu, sahte "temiz" rapordan iyidir. Kalan sapma loglanır.
+        if (!mixed.isEmpty()) log.error("Dil kapisi: onarim sonrasi hala yanlis dilde: {}", mixed);
+        return result;
+    }
+
+    // Yanlış dildeki alanları tek çağrıda rapor diline çevirir; sayılar, tarihler, dipnot numaraları aynen kalır.
+    // Şema alan başına sabit anahtar (t0..tN) taşır; model öğe birleştirip sayıyı bozamaz.
+    private AuditResponse repairLanguage(AuditResponse r, Lang lang) {
+        String name = lang.isTurkish() ? "Turkish" : "English";
+        List<String> fields = new ArrayList<>();
+        fields.add(r.summary()); fields.add(r.scoreRationale());
+        for (AuditResponse.Risk k : r.risks()) { fields.add(k.title()); fields.add(k.evidence()); fields.add(k.finding()); }
+        fields.addAll(r.recommendations());
+        fields.addAll(r.advisorQuestions());
+        try {
+            // Yalnızca yanlış dilde görünen alanlar gönderilir; doğru dildekiler yerinde kalır.
+            // Çeviri çıktısı kısalır, çağrı hızlanır, doğru cümleye dokunulmaz.
+            Map<String, Object> props = new LinkedHashMap<>();
+            Map<String, Object> input = new LinkedHashMap<>();
+            List<String> keys = new ArrayList<>();
+            for (int i = 0; i < fields.size(); i++) {
+                Lang found = LanguageCheck.detect(fields.get(i));
+                if (found == null || found == lang) continue;
+                String key = "t" + i;
+                keys.add(key);
+                props.put(key, Map.of("type", "string"));
+                input.put(key, fields.get(i));
+            }
+            if (keys.isEmpty()) return r;
+            Map<String, Object> schema = Map.of("type", "object", "additionalProperties", false,
+                    "required", keys, "properties", props);
+            Map<String, Object> body = Map.of(
+                    "model", model, "temperature", 0, "seed", 7,
+                    "response_format", Map.of("type", "json_schema", "json_schema",
+                            Map.of("name", "translation", "strict", true, "schema", schema)),
+                    "messages", List.of(
+                            Map.of("role", "system", "content", "Translate the value of every key into " + name
+                                    + ", including quotations and clause texts from documents (translate them, do not keep the original language)."
+                                    + " Keep numbers, dates, currency, percentages and note references exactly as written."
+                                    + " Values already entirely in " + name + " are returned unchanged. Return every key."),
+                            Map.of("role", "user", "content", objectMapper.writeValueAsString(input))));
+            JsonNode response = postToLlmWithRetry(body);
+            JsonNode out = objectMapper.readTree(response.at("/choices/0/message/content").asText());
+            List<String> translated = new ArrayList<>(fields);
+            for (int i = 0; i < fields.size(); i++) {
+                JsonNode v = out.get("t" + i);
+                if (v != null && !v.isNull() && !v.asText().isBlank()) translated.set(i, v.asText());
+            }
+            int i = 0;
+            String summary = translated.get(i++);
+            String rationale = translated.get(i++);
+            List<AuditResponse.Risk> risks = new ArrayList<>();
+            for (AuditResponse.Risk k : r.risks()) {
+                String title = translated.get(i++), evidence = translated.get(i++), finding = translated.get(i++);
+                risks.add(new AuditResponse.Risk(title, k.severity(), finding, evidence, k.pages(), k.source(), k.quote()));
+            }
+            List<String> recs = new ArrayList<>();
+            for (int n = 0; n < r.recommendations().size(); n++) recs.add(translated.get(i++));
+            List<String> qs = new ArrayList<>();
+            for (int n = 0; n < r.advisorQuestions().size(); n++) qs.add(translated.get(i++));
+            return new AuditResponse(r.riskScore(), rationale, summary, risks, recs, r.keyMetrics(), qs,
+                    r.references(), r.language(), r.pageCount());
+        } catch (Exception e) {
+            log.warn("Dil onarimi basarisiz: {}", e.toString());
+            return r;
+        }
     }
 
     // Parantezli karsilastirma serisini ("(2.609,7) (2.917,3) %11,8") tek okunur degere indir:
@@ -769,7 +1351,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
             String pctStr = "";
             while (pct.find()) pctStr = pct.group();
             String cleaned = nums.get(nums.size() - 1) + (pctStr.isEmpty() ? "" : " (" + pctStr + ")");
-            return new AuditResponse.KeyMetric(m.label(), cleaned, m.note());
+            return new AuditResponse.KeyMetric(m.label(), cleaned, m.unit(), m.note());
         }
         return m;
     }
@@ -781,6 +1363,24 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // kopya; (c) yuzde degerleri ancak sayi AYNEN esit VE etiketler ortak kelime paylasirsa
     // kopya (iki farkli oranin tesadufen ayni cikmasi mumkun, agresif eleme yanlis olur).
     // Kopyalardan hane sayisi fazla (daha hassas) olan tutulur; esitlikte ilk gelen kalir.
+    // Gösterge değeri belgenin herhangi bir sayfasında (biçimden bağımsız) geçmiyorsa kart düşer.
+    // İki haneli ve daha kısa sayılar (%80, 12 ay) doğrulanmaz, her belgede geçer.
+    private List<AuditResponse.KeyMetric> groundMetrics(List<AuditResponse.KeyMetric> metrics, Map<Integer, String> pages) {
+        if (metrics == null || metrics.isEmpty() || pages.isEmpty()) return metrics;
+        Set<String> docKeys = new HashSet<>();
+        for (String page : pages.values()) docKeys.addAll(NumberText.digitKeys(page));
+        List<AuditResponse.KeyMetric> kept = new ArrayList<>();
+        for (AuditResponse.KeyMetric m : metrics) {
+            String key = NumberText.digits(m.value());
+            if (key.length() >= 3 && !docKeys.contains(key)) {
+                log.warn("Gosterge belgede yok, dusuruldu: {} = {}", m.label(), m.value());
+                continue;
+            }
+            kept.add(m);
+        }
+        return kept;
+    }
+
     private List<AuditResponse.KeyMetric> dedupeMetrics(List<AuditResponse.KeyMetric> metrics) {
         if (metrics == null || metrics.size() < 2) return metrics;
         List<AuditResponse.KeyMetric> kept = new ArrayList<>();
@@ -1071,19 +1671,7 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     }
 
     private static final Pattern PAGE_MARKER = Pattern.compile("\\[REPORT PAGE (\\d+)\\]");
-    // Kanit metnine sizan ciplak isaretci ("... yukselmistir [REPORT PAGE 11]") — kullaniciya gitmemeli
-    private static final Pattern MARKER_IN_TEXT =
-            Pattern.compile("\\s*\\[REPORT PAGE \\d+\\]\\s*", Pattern.CASE_INSENSITIVE);
-    // "(Rapor Sayfa 8)", "(Sayfa 5, 11)", "(Page 10)" gibi parantezli sayfa atiflarini yakalar
-    private static final Pattern PAGE_PAREN =
-            Pattern.compile("\\((?:Rapor\\s+)?(?:Sayfa|Report\\s+Page|Page)\\s+[0-9,\\s-]+\\)", Pattern.CASE_INSENSITIVE);
-    // Ayirt edici sayisal cipalar: 18.205,5 / 500.000.000 / 44,8 / %51,3
-    // Duz tam sayilar (2026, 5G) eslesmez; yil ve etiket gurultusu boylece dislanir
-    private static final Pattern NUMBER_ANCHOR =
-            Pattern.compile("%?\\d{1,3}(?:\\.\\d{3})+(?:,\\d+)?|%?\\d+,\\d+");
-    // Taranmis belgelerdeki duz tutarlar (1300, 2600) icin: 3+ haneli tam sayilar, yillar haric
-    private static final Pattern PLAIN_INT_ANCHOR =
-            Pattern.compile("(?<![\\d.,])\\d{3,}(?![\\d.,])");
+    // Çıpa: en az 3 rakamlı ya da ondalıklı sayılar; düz yıl (2024) çıpa sayılmaz.
     private static final Pattern YEAR_LIKE = Pattern.compile("(?:19|20)\\d{2}");
 
     private Map<Integer, String> splitPages(String documentText) {
@@ -1106,53 +1694,110 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         return pages;
     }
 
+    // Kanıttaki sayıları sayfalarda arar. Karşılaştırma rakam dizisi üzerinden yapılır; "24.833.723"
+    // ile "24,833,723" aynı sayıdır, rapor dili belge dilinden farklı olsa da eşleşir.
+    /** Alıntının geçtiği sayfalar. Birden fazla sayfada geçiyorsa (tekrar eden madde) hiçbiri
+     *  seçilmez; o zaman sayı temelli bulmaya düşülür. */
+    /**
+     * Alıntının eşleştiği sayfalardan bulgunun sayfasını seçer. Tek eşleşme varsa sayfa odur.
+     * Birden çok eşleşmede alıntı hangi sayfa olduğunu söyleyemez; modelin bildirdiği sayfa
+     * eşleşmelerden biriyse o seçilir, değilse sayfa boş döner ve başka yoldan aranır. Eşleşmenin
+     * çokluğu bulguyu geçersiz kılmaz: ek bölümlü sözleşmelerde aynı madde tekrar tekrar yazılır.
+     */
+    static List<Integer> pageFromQuoteHits(List<Integer> quoteHits, Collection<Integer> claimedPages) {
+        if (quoteHits == null || quoteHits.isEmpty()) return List.of();
+        if (quoteHits.size() == 1) return List.copyOf(quoteHits);
+        if (claimedPages == null) return List.of();
+        SortedSet<Integer> overlap = new TreeSet<>(claimedPages);
+        overlap.retainAll(quoteHits);
+        return overlap.isEmpty() ? List.of() : List.of(overlap.first());
+    }
+
+    private List<Integer> pagesOfQuote(String quote, Map<Integer, String> pages) {
+        if (quote == null || quote.isBlank() || pages.isEmpty()) {
+            return List.of();
+        }
+        List<Integer> hits = new ArrayList<>();
+        for (Map.Entry<Integer, String> page : pages.entrySet()) {
+            if (QuoteMatch.occursIn(quote, page.getValue())) hits.add(page.getKey());
+        }
+        // Eşleşen sayfaların hepsi döner. Kaç tane olduğuna göre ne yapılacağına çağıran karar verir:
+        // tek sayfaysa sayfa odur, birden çoksa sayfa belirsizdir ama alıntı belgede vardır.
+        return hits;
+    }
+
     private List<Integer> groundPages(String evidence, Map<Integer, String> pages) {
         if (evidence == null || pages.isEmpty()) {
             return List.of();
         }
-        // Parantezli sayfa atfini cipa aramasindan dislayalim ki "(Sayfa 5, 11)" icindeki
-        // sayilar cipa sanilmasin
-        String searchable = PAGE_PAREN.matcher(evidence).replaceAll(" ");
-        Matcher m = NUMBER_ANCHOR.matcher(searchable);
+        // Tek sayfalık belgede aranacak bir şey yok.
+        if (pages.size() == 1) return List.copyOf(pages.keySet());
         Set<String> anchors = new LinkedHashSet<>();
-        while (m.find()) {
-            anchors.add(m.group());
+        // Sayfa anahtarları NumberText ile üretiliyor; kanıt da aynı tokenizer'dan geçmeli, yoksa
+        // boşluk ayraçlı sayılar ("4 180,0") iki tarafta farklı bölünüp bulgu yanlış sayfaya gider.
+        for (String tok : NumberText.tokens(evidence)) {
+            String key = NumberText.digits(tok);
+            boolean decimal = tok.matches(".*[.,]\\d{1,2}$") && key.length() >= 2;
+            if (YEAR_LIKE.matcher(tok).matches()) continue;
+            if (key.length() >= 3 || decimal) anchors.add(key);
         }
-        Matcher plain = PLAIN_INT_ANCHOR.matcher(searchable);
-        while (plain.find()) {
-            String token = plain.group();
-            if (!YEAR_LIKE.matcher(token).matches()) {
-                anchors.add(token);
-            }
+        anchors.addAll(NumberText.percentKeys(evidence));
+        Map<Integer, Set<String>> pageKeys = new HashMap<>();
+        for (Map.Entry<Integer, String> page : pages.entrySet()) {
+            Set<String> keys = new HashSet<>(NumberText.digitKeys(page.getValue()));
+            keys.addAll(NumberText.percentKeys(page.getValue()));
+            pageKeys.put(page.getKey(), keys);
         }
-        // Her cipanin gectigi sayfalar; tek sayfada gecen cipalar guclu oy sayilir.
-        // Sinir kontrolu: "44,8" cipasi "144,8" veya "44,85" icinde eslesmesin
+        // Tek sayfada geçen çıpa güçlü oy; hepsi çok sayfadaysa en çok oyu alan sayfa seçilir.
         SortedSet<Integer> strong = new TreeSet<>();
         Map<Integer, Integer> votes = new HashMap<>();
         for (String anchor : anchors) {
-            Pattern bounded = Pattern.compile("(?<![\\d.,])" + Pattern.quote(anchor) + "(?![\\d])");
             List<Integer> hits = new ArrayList<>();
-            for (Map.Entry<Integer, String> page : pages.entrySet()) {
-                if (bounded.matcher(page.getValue()).find()) {
-                    hits.add(page.getKey());
-                }
+            for (Map.Entry<Integer, Set<String>> page : pageKeys.entrySet()) {
+                if (page.getValue().contains(anchor)) hits.add(page.getKey());
             }
-            if (hits.size() == 1) {
-                strong.add(hits.get(0));
-            }
-            for (Integer hit : hits) {
-                votes.merge(hit, 1, Integer::sum);
-            }
+            if (hits.size() == 1) strong.add(hits.get(0));
+            for (Integer hit : hits) votes.merge(hit, 1, Integer::sum);
         }
         if (!strong.isEmpty()) {
             return List.copyOf(strong);
         }
-        // Tum cipalar birden fazla sayfada geciyorsa en cok oyu alan sayfayi sec
-        return votes.entrySet().stream()
+        List<Integer> byVote = votes.entrySet().stream()
                 .max(Map.Entry.<Integer, Integer>comparingByValue()
                         .thenComparing(Map.Entry.comparingByKey(Comparator.reverseOrder())))
                 .map(e -> List.of(e.getKey()))
                 .orElse(List.of());
+        return byVote.isEmpty() ? groundByWords(evidence, pages) : byVote;
+    }
+
+    // Sayı yoksa (sözleşme maddeleri) kanıt cümlesinin ayırt edici kelimeleri en çok hangi sayfada
+    // geçiyorsa bulgu o sayfaya bağlanır; en az üç kelime eşleşmezse sayfa verilmez.
+    private static final Pattern WORD_TOKEN = Pattern.compile("\\p{L}{5,}");
+
+    // Rapor dili belge dilinden farklıysa kelimeler eşleşmez; sayılar, yıllar, dipnot numaraları ve
+    // özel adlar (büyük harfle başlayan) çeviride değişmez, onlar da çıpa olur.
+    private static final Pattern PROPER_NOUN = Pattern.compile("\\b\\p{Lu}\\p{Ll}{3,}\\b");
+    private static final Pattern SHORT_NUMBER = Pattern.compile("\\b\\d{1,4}(?:[.,]\\d+)?\\b");
+
+    private List<Integer> groundByWords(String evidence, Map<Integer, String> pages) {
+        Set<String> words = new HashSet<>();
+        Matcher m = WORD_TOKEN.matcher(evidence.toLowerCase(Locale.forLanguageTag("tr")));
+        while (m.find()) words.add(m.group());
+        Matcher pn = PROPER_NOUN.matcher(evidence);
+        while (pn.find()) words.add(pn.group().toLowerCase(Locale.forLanguageTag("tr")));
+        Matcher sn = SHORT_NUMBER.matcher(evidence);
+        while (sn.find()) words.add(sn.group());
+        if (words.size() < 3) return List.of();
+        int bestPage = -1, best = 0;
+        for (Map.Entry<Integer, String> page : pages.entrySet()) {
+            String text = page.getValue().toLowerCase(Locale.forLanguageTag("tr"));
+            int hits = 0;
+            for (String w : words) if (text.contains(w)) hits++;
+            if (hits > best || (hits == best && hits > 0 && page.getKey() < bestPage)) { best = hits; bestPage = page.getKey(); }
+        }
+        // Az sayfalı belgede iki çıpa yeter; uzun belgede en az üç.
+        int minHits = pages.size() <= 3 ? 2 : 3;
+        return best >= minHits ? List.of(bestPage) : List.of();
     }
 
     // skor, bulgu siddet dagilimiyla ayni bantta kalsin
@@ -1160,33 +1805,52 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
     // YUKSEK skor = temiz/guvenli, DUSUK skor = dikkat. 100'den baslar, bulgular dusurur.
     // Ayni belge (ayni bulgular) her calistirmada AYNI skoru verir.
     // En yuksek onem seviyesi bandi garanti edilir; cumle ve renk de bu banttan turer.
-    private int calibrateScore(int ignoredLlmScore, List<AuditResponse.Risk> risks) {
-        int crit = 0, high = 0, mid = 0, low = 0;
-        if (risks != null) {
-            for (AuditResponse.Risk r : risks) {
-                switch (severityRank(r.severity())) {
-                    case 4 -> crit++;
-                    case 3 -> high++;
-                    case 2 -> mid++;
-                    case 1 -> low++;
-                    default -> { }
-                }
-            }
-        }
-        int penalty = crit * 45 + high * 28 + mid * 8 + low * 3;
-        int score = Math.max(0, Math.min(100, 100 - penalty));
-        // Bant garantisi (yuksek=iyi): en agir bulgu skorun tavanini belirler.
-        if (crit > 0) return Math.min(29, score);                 // kırmızı — madde madde
-        if (high > 0) return Math.max(30, Math.min(54, score));   // turuncu — dikkatle
-        if (mid > 0)  return Math.max(55, Math.min(79, score));   // sarı — gözden geçir
-        return Math.max(80, Math.min(100, score));                // yeşil — temiz
+    // Capraz kontrol eklemeleri bu on ekle isaretlenir; skora DAHIL EDILMEZLER.
+    // Skor yalnizca birincil (OpenAI, temperature 0 + seed) bulgulardan hesaplanir — determinizm korunur.
+    private static final String CROSS_PREFIX_TR = "Çapraz doğrulama: ";
+    private static final String CROSS_PREFIX_EN = "Cross-check: ";
+
+    private static boolean isCrossAddition(AuditResponse.Risk r) {
+        String t = r == null ? null : r.title();
+        return t != null && (t.startsWith(CROSS_PREFIX_TR) || t.startsWith(CROSS_PREFIX_EN));
     }
 
-    private String languageInstruction(String language) {
-        if ("tr".equalsIgnoreCase(language)) {
-            return "\nWrite every textual output field (summary, scoreRationale, finding titles, evidence, recommendations, keyMetrics labels and notes, advisorQuestions) in Turkish.";
+    // Skor iki şeyden türer: en ağır bulgunun seviyesi (bant) ve bulgu sayısının az mı çok mu olduğu
+    // (bant içi konum). Bulgu sayısı bire bir puana çevrilmez; LLM'in bir bulgu fazla ya da eksik
+    // üretmesi skoru oynatmasın. Çapraz kontrol eklemeleri sayılmaz.
+
+    private int calibrateScore(int ignoredLlmScore, List<AuditResponse.Risk> risks) {
+        int top = 0;
+        boolean observation = false;
+        if (risks != null) {
+            for (AuditResponse.Risk r : risks) {
+                if (r.isModel()) observation = true;
+                if (isCrossAddition(r) || r.isModel()) continue; // ek gözlemler skora girmez
+                // Skoru yalnızca en ağır bulgu belirliyor. Bulgu sayısı ya da ağırlık toplamı
+                // hesaba girmiyor: gürültülü bir sayının üstündeki eşik er geç atlanıyor ve aynı
+                // belge farklı skor alıyordu.
+                top = Math.max(top, severityRank(r.severity()));
+            }
         }
-        return "";
+        // Skora giren bulgu yokken ekranda ek gözlem duruyorsa 95 basmıyoruz: kullanıcı bulguyu
+        // görürken altında "belge temiz" yazıyordu. En alt band bu durumu doğru anlatıyor.
+        if (top == 0 && observation) {
+            return com.audittrove.report.ScoreScale.of(1);
+        }
+        return com.audittrove.report.ScoreScale.of(top);
+    }
+
+    // Rapor dili belgenin dilinden bağımsızdır; alıntı bile rapor diline çevrilir, sayılar aynen kalır.
+    private String languageInstruction(Lang lang) {
+        String name = lang.isTurkish() ? "Turkish" : "English";
+        return "\nOUTPUT LANGUAGE: " + name + ". Write EVERY textual field (summary, scoreRationale, finding titles,"
+                + " finding text, evidence, recommendations, keyMetrics labels/units/notes, advisorQuestions) in "
+                + name + ", regardless of the language of the document. When you paraphrase the document,"
+                + " render it in " + name + " as well; keep numbers, dates, currency and note references exactly as printed."
+                + " Never mix languages within the report."
+                // Alıntı çevrilirse belgede aranamaz, bulgu sayfa üzerinde işaretlenemez. Tek istisna bu alan.
+                + " THE ONLY EXCEPTION IS the 'quote' field: copy it character by character from the document,"
+                + " in the document's own language. Never translate, shorten or rewrite a quote.";
     }
 
     private String userPrompt(String documentText, List<RegulationChunk> context) {
@@ -1209,12 +1873,14 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         Map<String, Object> risk = Map.of(
                 "type", "object",
                 "additionalProperties", false,
-                "required", List.of("title", "severity", "finding", "evidence"),
+                "required", List.of("title", "severity", "finding", "evidence", "quote"),
                 "properties", Map.of(
                         "title", Map.of("type", "string"),
                         "severity", Map.of("type", "string", "enum", List.of("LOW", "MEDIUM", "HIGH", "CRITICAL")),
                         "finding", Map.of("type", "string"),
-                        "evidence", Map.of("type", "string")));
+                        "evidence", Map.of("type", "string"),
+                        "quote", Map.of("type", "string", "description",
+                                "Verbatim excerpt copied from the document, in the document's own language. Never translate.")));
         Map<String, Object> reference = Map.of(
                 "type", "object",
                 "additionalProperties", false,
@@ -1226,10 +1892,11 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
         Map<String, Object> keyMetric = Map.of(
                 "type", "object",
                 "additionalProperties", false,
-                "required", List.of("label", "value", "note"),
+                "required", List.of("label", "value", "unit", "note"),
                 "properties", Map.of(
                         "label", Map.of("type", "string"),
                         "value", Map.of("type", "string"),
+                        "unit", Map.of("type", "string"),
                         "note", Map.of("type", "string")));
         Map<String, Object> props = new java.util.LinkedHashMap<String, Object>();
         props.put("riskScore", Map.of("type", "integer", "minimum", 0, "maximum", 100));
@@ -1246,5 +1913,163 @@ public class OpenAiAuditLlmClient implements AuditLlmClient {
                 "required", List.of("riskScore", "scoreRationale", "summary", "risks",
                         "recommendations", "keyMetrics", "advisorQuestions", "references"),
                 "properties", props);
+    }
+
+    // ================= COKLU MODEL CAPRAZ KONTROL =================
+    // Ayni metin birincil (OpenAI) + yapilandirilmis ikincil modellere (Claude, Gemini) paralel gider.
+    // Birlestirme deterministik kurallarla yapilir:
+    //  - Birincil bulgularin TAMAMI korunur (mevcut davranis asla geriye gitmez).
+    //  - Birincilde olmayan bir bulgu YALNIZCA her iki ikincil model de gorduyse eklenir (oy >= 2),
+    //    cagri basina en fazla 3 adet; eklenen bulgunun severity'si ikisinden dusuk olani (temkinli).
+    //  - Skor yine mevcut deterministik hatta (postProcess/calibrate) hesaplanir.
+    //  - Ikincil model hatasi isi ASLA cokertmez; WARN loglanir, kalanla devam edilir.
+
+    private AuditResponse auditSingleCross(String documentText, List<RegulationChunk> context,
+                                           Lang lang, String documentType) {
+        if (!multiModelEnabled) return auditSingle(documentText, context, lang, documentType);
+        List<SecondaryBackend> active = secondaryBackends == null ? List.of()
+                : secondaryBackends.stream().filter(SecondaryBackend::configured).toList();
+        if (active.size() < 2) return auditSingle(documentText, context, lang, documentType); // oy >= 2 icin iki ikincil sart
+
+        // Ikincilleri ONCE baslat: birincil bu is parcaciginda kosarken onlar da paralel calisir.
+        // Toplam sure = max(birincil, en yavas ikincil) — sirali toplamdan cok daha kisa.
+        Map<String, List<AuditResponse.Risk>> secondaryRisks = new LinkedHashMap<>();
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        for (SecondaryBackend backend : active) {
+            futures.add(CompletableFuture.runAsync(() -> {
+                List<AuditResponse.Risk> risks = secondaryAudit(backend, documentText, context, lang, documentType);
+                synchronized (secondaryRisks) { secondaryRisks.put(backend.name(), risks); }
+            }, crossCheckExecutor));
+        }
+        AuditResponse primary = auditSingle(documentText, context, lang, documentType);
+        try {
+            // Çapraz kontrol yalnızca skora girmeyen ek gözlemleri süzer; birincil bittikten sonra
+            // ikincillere kısa bir pay verilir, geç kalan o turda atlanır. Rapor bu yüzden sürünmez.
+            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).get(CROSS_GRACE_SECONDS, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            log.warn("Capraz kontrol birincilden {} sn sonra hala bitmedi — geciken ikinciller bu turda atlaniyor", CROSS_GRACE_SECONDS);
+        } catch (Exception e) {
+            log.warn("Capraz kontrol beklenirken sorun: {}", e.toString());
+        }
+        return mergeCross(primary, secondaryRisks, lang);
+    }
+
+    private List<AuditResponse.Risk> secondaryAudit(SecondaryBackend backend, String documentText,
+                                                    List<RegulationChunk> context, Lang lang, String documentType) {
+        try {
+            String system = SYSTEM_PROMPT + typeInstruction(documentType) + languageInstruction(lang)
+                    + "\nRespond with ONLY one JSON object (no markdown fences, no commentary) that validates against this JSON Schema:\n"
+                    + schemaJson();
+            String content = secondaryCall(backend, system, userPrompt(documentText, context));
+            String json = extractJsonObject(content);
+            if (json.isBlank()) {
+                log.warn("Capraz kontrol {}: bos veya JSON olmayan yanit", backend.name());
+                return List.of();
+            }
+            AuditResponse parsed = objectMapper.readValue(json, AuditResponse.class);
+            List<AuditResponse.Risk> risks = parsed.risks() == null ? List.of() : parsed.risks();
+            log.info("Capraz kontrol {}: {} bulgu", backend.name(), risks.size());
+            return risks;
+        } catch (Exception e) {
+            log.warn("Capraz kontrol {} basarisiz: {}", backend.name(), e.toString());
+            return List.of();
+        }
+    }
+
+    private AuditResponse mergeCross(AuditResponse primary, Map<String, List<AuditResponse.Risk>> secondaryRisks, Lang lang) {
+        List<AuditResponse.Risk> primaryRisks = primary.risks() == null ? List.of() : primary.risks();
+        List<List<AuditResponse.Risk>> secondaries = new ArrayList<>(secondaryRisks.values());
+        if (secondaries.size() < 2) return primary;
+        List<AuditResponse.Risk> a = secondaries.get(0);
+        List<AuditResponse.Risk> b = secondaries.get(1);
+
+        // KONSENSUS OYLAMASI: bir LLM bulgusu ancak en az 2 modelin gordugu bulguysa rapora girer.
+        // Bos donen (basarisiz/katkisiz) ikincil oy kullanamaz; hic oylayan yoksa oylama atlanir
+        // (tek modele kalmis isi fakirlestirmeyelim). Deterministik finansal motor bulgulari bu
+        // asamadan SONRA (postProcess'te) eklendigi icin oylamadan muaftir — her zaman kalir.
+        List<List<AuditResponse.Risk>> voters = new ArrayList<>();
+        if (a != null && !a.isEmpty()) voters.add(a);
+        if (b != null && !b.isEmpty()) voters.add(b);
+
+        List<AuditResponse.Risk> kept = new ArrayList<>();
+        int dropped = 0;
+        if (voters.isEmpty()) {
+            kept.addAll(primaryRisks);
+        } else {
+            for (AuditResponse.Risk p : primaryRisks) {
+                boolean voted = false;
+                for (List<AuditResponse.Risk> v : voters) {
+                    if (findMatch(p, v) != null) { voted = true; break; }
+                }
+                if (voted) kept.add(p); else dropped++;
+            }
+        }
+
+        List<AuditResponse.Risk> additions = new ArrayList<>();
+        for (AuditResponse.Risk ra : a) {
+            if (findMatch(ra, primaryRisks) != null) continue;
+            AuditResponse.Risk rb = findMatch(ra, b);
+            if (rb == null) continue;
+            if (findMatch(ra, additions) != null) continue;
+            AuditResponse.Risk chosen = severityRank(ra.severity()) <= severityRank(rb.severity()) ? ra : rb;
+            String prefix = lang.isTurkish() ? CROSS_PREFIX_TR : CROSS_PREFIX_EN;
+            additions.add(new AuditResponse.Risk(prefix + chosen.title(), chosen.severity(),
+                    chosen.finding(), chosen.evidence(), chosen.pages(), AuditResponse.Risk.MODEL, chosen.quote()));
+            if (additions.size() >= 3) break;
+        }
+        log.info("Konsensus ozeti: birincil={} bulgu, tutulan={}, elenen={}, eklenen={}",
+                primaryRisks.size(), kept.size(), dropped, additions.size());
+        if (dropped == 0 && additions.isEmpty()) return primary;
+        List<AuditResponse.Risk> merged = new ArrayList<>(kept);
+        merged.addAll(additions);
+        return new AuditResponse(primary.riskScore(), primary.scoreRationale(), primary.summary(),
+                merged, primary.recommendations(), primary.keyMetrics(), primary.advisorQuestions(),
+                primary.references());
+    }
+
+    private AuditResponse.Risk findMatch(AuditResponse.Risk r, List<AuditResponse.Risk> list) {
+        if (list == null || list.isEmpty()) return null;
+        Set<String> tokens = riskTokens(r);
+        for (AuditResponse.Risk other : list) {
+            Set<String> ot = riskTokens(other);
+            int shared = 0;
+            for (String t : tokens) if (ot.contains(t)) shared++;
+            int minSize = Math.max(1, Math.min(tokens.size(), ot.size()));
+            if (shared >= 2 && (double) shared / minSize >= 0.25) return other;
+        }
+        return null;
+    }
+
+    private Set<String> riskTokens(AuditResponse.Risk r) {
+        String text = ((r.title() == null ? "" : r.title()) + " " + (r.finding() == null ? "" : r.finding()))
+                .toLowerCase(Locale.ROOT)
+                .replace('\u0131', 'i').replace('\u015f', 's').replace('\u011f', 'g')
+                .replace('\u00e7', 'c').replace('\u00f6', 'o').replace('\u00fc', 'u');
+        Set<String> out = new HashSet<>();
+        for (String t : text.split("[^a-z0-9%]+")) {
+            if (t.length() >= 4) out.add(t);
+        }
+        return out;
+    }
+
+    private String schemaJson() {
+        String cached = schemaJsonCache;
+        if (cached != null) return cached;
+        try {
+            cached = objectMapper.writeValueAsString(responseSchema());
+        } catch (Exception e) {
+            cached = "{}";
+        }
+        schemaJsonCache = cached;
+        return cached;
+    }
+
+    private static String extractJsonObject(String content) {
+        if (content == null) return "";
+        String s = content.trim();
+        int start = s.indexOf('{');
+        int end = s.lastIndexOf('}');
+        if (start < 0 || end <= start) return "";
+        return s.substring(start, end + 1);
     }
 }

@@ -1,0 +1,313 @@
+package com.audittrove.pdf;
+
+import com.audittrove.api.AuditResponse;
+import com.audittrove.financial.NumberText;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * Bulgu kanıtını sayfanın satırlarına bağlar. Kural, sayfa gerekçelendirmesiyle aynı: önce sayılar
+ * (biçimden bağımsız rakam anahtarı), sayı yoksa ayırt edici kelimeler ve özel adlar. Kanıt raporun dilinde,
+ * belge başka dilde olsa bile sayılar ve özel adlar değişmediği için eşleşme çoğu zaman tutar.
+ * Eşleşme bulunamazsa dikdörtgen verilmez; arayüz sayfa kenarında şerit gösterir, yanlış yer boyamaz.
+ */
+public final class EvidenceLocator {
+    private EvidenceLocator() {}
+
+    private static final Pattern YEAR_LIKE = Pattern.compile("(?:19|20)\\d{2}");
+    private static final Pattern WORD_TOKEN = Pattern.compile("\\p{L}{5,}");
+    private static final Pattern PROPER_NOUN = Pattern.compile("\\b\\p{Lu}\\p{Ll}{3,}\\b");
+    private static final Locale TR = Locale.forLanguageTag("tr");
+    private static final int MAX_LINES = 6;
+    private static final int WINDOW = 3;
+
+    /** Her bulguya, sayfalarındaki kanıt yerlerini ekler. Sayfa metni yoksa bulgu olduğu gibi kalır. */
+    public static AuditResponse annotate(AuditResponse response, Map<Integer, PageText> pages) {
+        if (response == null || pages == null || pages.isEmpty()) return response;
+        List<AuditResponse.Risk> out = new ArrayList<>();
+        for (AuditResponse.Risk risk : response.risks()) {
+            List<AuditResponse.Anchor> anchors = new ArrayList<>();
+            for (Integer p : risk.pages()) {
+                PageText page = pages.get(p);
+                if (page == null) continue;
+                // Önce belgeden kelimesi kelimesine alıntı (belgenin dilinde, çeviriden etkilenmez),
+                // sonra kanıt cümlesi, en son bulgu metni.
+                List<AuditResponse.Rect> rects = locateLiteral(risk.quote(), page);
+                if (rects.isEmpty()) rects = locate(risk.quote(), page);
+                if (rects.isEmpty()) rects = locate(risk.evidence(), page);
+                if (rects.isEmpty()) rects = locate(risk.finding(), page);
+                // Konumu bulunamayan sayfa için çıpa eklenmez. Boş dikdörtgen listesi taşıyan çıpa
+                // görüntüleyiciye "burada işaretlenecek bir yer var" diyor, oysa yok.
+                if (rects.isEmpty()) continue;
+                anchors.add(new AuditResponse.Anchor(p, rects));
+            }
+            AuditResponse.Risk anchored = anchors.isEmpty() ? risk : risk.withAnchors(anchors);
+            // Ek gözlem (skor dışı) sayılan bir bulguyla aynı satırlara oturuyorsa aynı konudur; düşer.
+            // Kelime benzerliği farklı cümlelerde kaçırır, belgedeki yer kaçırmaz.
+            if (anchored.isModel() && sharesLocationWithCounted(anchored, out)) continue;
+            out.add(anchored);
+        }
+        return new AuditResponse(response.riskScore(), response.scoreRationale(), response.summary(), out,
+                response.recommendations(), response.keyMetrics(), response.advisorQuestions(),
+                response.references(), response.language(), response.pageCount());
+    }
+
+    private static boolean sharesLocationWithCounted(AuditResponse.Risk candidate, List<AuditResponse.Risk> accepted) {
+        for (AuditResponse.Risk other : accepted) {
+            if (other.isModel()) continue;
+            for (AuditResponse.Anchor a : candidate.anchors()) {
+                for (AuditResponse.Anchor b : other.anchors()) {
+                    if (a.page() != b.page()) continue;
+                    for (AuditResponse.Rect ra : a.rects()) {
+                        for (AuditResponse.Rect rb : b.rects()) {
+                            if (overlapsVertically(ra, rb)) return true;
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    // Dikeyde küçük olanın yarısından fazlası ortaksa aynı satırlardır.
+    private static boolean overlapsVertically(AuditResponse.Rect a, AuditResponse.Rect b) {
+        double top = Math.max(a.y(), b.y());
+        double bottom = Math.min(a.y() + a.h(), b.y() + b.h());
+        double common = bottom - top;
+        return common > 0 && common / Math.min(a.h(), b.h()) > 0.5;
+    }
+
+    /** Kanıt metninin sayfada geçtiği satırların dikdörtgenleri; ardışık satırlar tek dikdörtgende birleşir. */
+    public static List<AuditResponse.Rect> locate(String evidence, PageText page) {
+        if (evidence == null || evidence.isBlank() || page == null || page.lines().isEmpty()) return List.of();
+        Set<String> numbers = numberKeys(evidence);
+        Set<String> words = wordKeys(evidence);
+        List<PageText.Line> lines = page.lines();
+        int n = lines.size();
+        int[] numberHits = new int[n];
+        int[] wordHits = new int[n];
+        List<Set<String>> wordsPerLine = new ArrayList<>(n);
+        boolean anyNumber = false;
+        for (int i = 0; i < n; i++) {
+            String text = lines.get(i).text();
+            if (!numbers.isEmpty()) {
+                Set<String> keys = new HashSet<>(NumberText.digitKeys(text));
+                keys.addAll(NumberText.percentKeys(text));
+                for (String k : numbers) if (keys.contains(k)) numberHits[i]++;
+                if (numberHits[i] > 0) anyNumber = true;
+            }
+            Set<String> hit = new HashSet<>();
+            String lower = text.toLowerCase(TR);
+            for (String w : words) if (lower.contains(w)) hit.add(w);
+            wordsPerLine.add(hit);
+            wordHits[i] = hit.size();
+        }
+        List<Integer> chosen = anyNumber ? byNumbers(numberHits, wordHits, lines) : byWords(wordsPerLine, words.size());
+        return merge(chosen, lines);
+    }
+
+    // Alıntı belgeden kelimesi kelimesine alındığı için önce birebir aranır. Satır sonuna denk gelen
+    // alıntı ("... sold \"as / is\".") kelime sayımıyla tutturulamıyordu; birebir arama satırları
+    // birleştirip baktığı için bölünmeden etkilenmez ve rapor dili ne olursa olsun aynı yeri bulur.
+    static List<AuditResponse.Rect> locateLiteral(String quote, PageText page) {
+        if (quote == null || page == null || page.lines().isEmpty()) return List.of();
+        String needle = normalize(quote);
+        if (!com.audittrove.report.QuoteMatch.searchable(needle)) return List.of();
+        List<PageText.Line> lines = page.lines();
+        StringBuilder joined = new StringBuilder();
+        List<Integer> lineOf = new ArrayList<>();
+        for (int i = 0; i < lines.size(); i++) {
+            String text = normalize(lines.get(i).text());
+            if (text.isEmpty()) continue;
+            if (joined.length() > 0) { joined.append(' '); lineOf.add(i); }
+            for (int c = 0; c < text.length(); c++) lineOf.add(i);
+            joined.append(text);
+        }
+        int at = joined.indexOf(needle);
+        if (at < 0) return merge(byFragments(needle, lines), lines);
+        int end = Math.min(lineOf.size() - 1, at + needle.length() - 1);
+        List<Integer> chosen = new ArrayList<>();
+        for (int i = lineOf.get(at); i <= lineOf.get(end); i++) chosen.add(i);
+        return merge(chosen, lines);
+    }
+
+    // Iki sutunlu sayfalarda (denetci raporlari boyle) satirlar yatay okunur, iki sutun ayni satira
+    // karisir; cumle butun olarak gecmez. Ama bes kelimelik parcalari kendi satirlarinda kesintisiz
+    // durur, o yuzden alinti parca parca aranir.
+    private static List<Integer> byFragments(String needle, List<PageText.Line> lines) {
+        List<String> windows = com.audittrove.report.QuoteMatch.windows(needle);
+        if (windows.isEmpty()) return List.of();
+        List<String> flat = new ArrayList<>(lines.size());
+        for (PageText.Line line : lines) flat.add(normalize(line.text()));
+        // Her parçanın eşleştiği BÜTÜN satırlar toplanır. Eskiden parça başına sayfadaki ilk eşleşme
+        // alınıyordu; benzer ifade sayfanın iki ayrı yerinde geçince parçalar birbirinden uzak satırlara
+        // dağılıyor ve çıpa cümlenin olmadığı yere oturuyordu.
+        List<Set<Integer>> hitsPerWindow = new ArrayList<>();
+        for (String window : windows) {
+            Set<Integer> where = new LinkedHashSet<>();
+            for (int i = 0; i < flat.size(); i++) {
+                if (flat.get(i).contains(window)) where.add(i);
+            }
+            if (!where.isEmpty()) hitsPerWindow.add(where);
+        }
+        int needed = com.audittrove.report.QuoteMatch.minWindowHits();
+        if (hitsPerWindow.size() < needed) return List.of();
+        // Aynı cümlenin parçaları sayfada birbirine yakın durur. En çok parçayı bir arada tutan
+        // MAX_LINES satırlık pencere seçilir; eşitlikte sayfanın üstündeki kazanır.
+        int bestStart = -1, bestCount = 0;
+        for (int start = 0; start < lines.size(); start++) {
+            int end = start + MAX_LINES - 1;
+            int count = 0;
+            for (Set<Integer> where : hitsPerWindow) {
+                for (int i : where) {
+                    if (i >= start && i <= end) { count++; break; }
+                }
+            }
+            if (count > bestCount) { bestCount = count; bestStart = start; }
+        }
+        if (bestCount < needed) return List.of();
+        List<Integer> chosen = new ArrayList<>();
+        for (Set<Integer> where : hitsPerWindow) {
+            for (int i : where) {
+                if (i >= bestStart && i <= bestStart + MAX_LINES - 1 && !chosen.contains(i)) chosen.add(i);
+            }
+        }
+        Collections.sort(chosen);
+        return chosen;
+    }
+
+    private static String normalize(String text) {
+        return com.audittrove.report.QuoteMatch.flatten(text);
+    }
+
+    // Sayı eşleşen satırlar: en çok sayı, sonra en çok kelime eşleşeni önde; en fazla MAX_LINES satır.
+    // Sayının geçtiği satırın komşusu aynı cümleyi sürdürüyorsa (en az iki kelime eşleşmesi) o da boyanır;
+    // "Madde 5 - Gecikme ..." başlığı ile "%0,5 oranında" satırı tek paragraf olarak görünür.
+    // Tablo satırları paragraf değildir: komşu satır kendisi de sayı dolu bir satırsa (başka bir kalem) alınmaz.
+    // Bir satırda iki sayı birden eşleşiyorsa kanıt o satırdır; aynı sayıların tek tek geçtiği grafik
+    // etiketleri, dipnotlar ve tekrarlar boyanmaz. Böyle bir satır yoksa tek eşleşmeli satırlar kalır.
+    private static List<Integer> byNumbers(int[] numberHits, int[] wordHits, List<PageText.Line> lines) {
+        int best = 0;
+        for (int h : numberHits) best = Math.max(best, h);
+        int threshold = best >= 2 ? 2 : 1;
+        List<Integer> idx = new ArrayList<>();
+        for (int i = 0; i < numberHits.length; i++) if (numberHits[i] >= threshold) idx.add(i);
+        idx.sort((a, b) -> numberHits[b] != numberHits[a] ? numberHits[b] - numberHits[a] : wordHits[b] - wordHits[a]);
+        if (idx.size() > MAX_LINES) idx = new ArrayList<>(idx.subList(0, MAX_LINES));
+        Set<Integer> out = new LinkedHashSet<>(idx);
+        for (int i : idx) {
+            if (out.size() >= MAX_LINES) break;
+            if (i > 0 && continuesSentence(wordHits[i - 1], lines.get(i - 1).text())) out.add(i - 1);
+            if (i + 1 < numberHits.length && continuesSentence(wordHits[i + 1], lines.get(i + 1).text())) out.add(i + 1);
+        }
+        return new ArrayList<>(out);
+    }
+
+    private static boolean continuesSentence(int wordHits, String text) {
+        return wordHits >= 2 && !com.audittrove.report.ReportGate.looksLikeRawRow(text);
+    }
+
+    // Sayı yoksa: ardışık üç satırlık pencerede en çok farklı kelime eşleşen yer. Kısa kanıtta iki, uzun kanıtta
+    // üç farklı kelime eşleşmesi gerekir; azı rastlantıdır, boyanmaz. Pencerenin eşleşmesiz kenarları kırpılır.
+    private static List<Integer> byWords(List<Set<String>> wordsPerLineRaw, int evidenceWords) {
+        int n = wordsPerLineRaw.size();
+        if (n == 0 || evidenceWords == 0) return List.of();
+        // Tek kelimeyle tutunan ve iki kelimeli bir komşusu olmayan satır ("CURRENT ASSETS" başlığındaki "assets")
+        // cümlenin parçası değildir; eşiğe katılmaz. Aksi halde yanlış sayfada zayıf eşleşme boyanır.
+        List<Set<String>> wordsPerLine = new ArrayList<>(n);
+        for (int i = 0; i < n; i++) {
+            Set<String> w = wordsPerLineRaw.get(i);
+            boolean lonely = w.size() == 1
+                    && (i == 0 || wordsPerLineRaw.get(i - 1).size() < 2)
+                    && (i + 1 >= n || wordsPerLineRaw.get(i + 1).size() < 2);
+            wordsPerLine.add(lonely ? Set.of() : w);
+        }
+        int minHits = evidenceWords < 6 ? 2 : 3;
+        int bestStart = -1, best = 0;
+        for (int s = 0; s < n; s++) {
+            Set<String> distinct = new HashSet<>();
+            for (int i = s; i < Math.min(n, s + WINDOW); i++) distinct.addAll(wordsPerLine.get(i));
+            if (distinct.size() > best) { best = distinct.size(); bestStart = s; }
+        }
+        if (bestStart < 0 || best < minHits) return List.of();
+        int from = bestStart, to = Math.min(n, bestStart + WINDOW) - 1;
+        // Paragraf pencereden uzunsa devamı da alınır: komşu satır en az iki kelime eşliyorsa dahil.
+        while (to + 1 < n && to - from + 1 < MAX_LINES && wordsPerLine.get(to + 1).size() >= 2) to++;
+        while (from - 1 >= 0 && to - from + 1 < MAX_LINES && wordsPerLine.get(from - 1).size() >= 2) from--;
+        // Kenarlarda tek kelimeyle tutunan satır komşu paragrafa aittir; kalan hâlâ yeterliyse atılır.
+        while (from < to && wordsPerLine.get(from).size() <= 1 && distinct(wordsPerLine, from + 1, to) >= minHits) from++;
+        while (to > from && wordsPerLine.get(to).size() <= 1 && distinct(wordsPerLine, from, to - 1) >= minHits) to--;
+        List<Integer> idx = new ArrayList<>();
+        for (int i = from; i <= to; i++) {
+            if (!wordsPerLine.get(i).isEmpty()) idx.add(i);
+        }
+        return idx;
+    }
+
+    private static int distinct(List<Set<String>> wordsPerLine, int from, int to) {
+        Set<String> all = new HashSet<>();
+        for (int i = from; i <= to; i++) all.addAll(wordsPerLine.get(i));
+        return all.size();
+    }
+
+    private static List<AuditResponse.Rect> merge(List<Integer> chosen, List<PageText.Line> lines) {
+        if (chosen.isEmpty()) return List.of();
+        List<Integer> sorted = new ArrayList<>(new LinkedHashSet<>(chosen));
+        sorted.sort(Integer::compareTo);
+        List<AuditResponse.Rect> out = new ArrayList<>();
+        AuditResponse.Rect current = lines.get(sorted.get(0)).rect();
+        int last = sorted.get(0);
+        for (int k = 1; k < sorted.size(); k++) {
+            int i = sorted.get(k);
+            AuditResponse.Rect r = lines.get(i).rect();
+            if (i == last + 1) {
+                current = union(current, r);
+            } else {
+                out.add(current);
+                current = r;
+            }
+            last = i;
+        }
+        out.add(current);
+        return out;
+    }
+
+    private static AuditResponse.Rect union(AuditResponse.Rect a, AuditResponse.Rect b) {
+        double x = Math.min(a.x(), b.x());
+        double y = Math.min(a.y(), b.y());
+        double right = Math.max(a.x() + a.w(), b.x() + b.w());
+        double bottom = Math.max(a.y() + a.h(), b.y() + b.h());
+        return new AuditResponse.Rect(x, y, right - x, bottom - y);
+    }
+
+    // Kanıttaki sayı çıpaları: en az üç rakam ya da ondalıklı; düz yıl çıpa değil. Yüzdeler ayrı anahtar.
+    static Set<String> numberKeys(String text) {
+        Set<String> keys = new LinkedHashSet<>();
+        for (String tok : NumberText.tokens(text)) {
+            if (YEAR_LIKE.matcher(tok).matches()) continue;
+            String key = NumberText.digits(tok);
+            boolean decimal = tok.matches(".*[.,]\\d{1,2}$") && key.length() >= 2;
+            if (key.length() >= 3 || decimal) keys.add(key);
+        }
+        keys.addAll(NumberText.percentKeys(text));
+        return keys;
+    }
+
+    static Set<String> wordKeys(String text) {
+        Set<String> words = new LinkedHashSet<>();
+        Matcher m = WORD_TOKEN.matcher(text.toLowerCase(TR));
+        while (m.find()) words.add(m.group());
+        Matcher pn = PROPER_NOUN.matcher(text);
+        while (pn.find()) words.add(pn.group().toLowerCase(TR));
+        return words;
+    }
+}
