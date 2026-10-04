@@ -1,1 +1,0 @@
-{"jsonrpc":"2.0","id":1,"error":{"message":"This PDF has no text layer (it is a scan or a photo). Extract the text yourself and send it as pageTexts or documentText.","code":-32602}}
