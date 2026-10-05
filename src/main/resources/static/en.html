@@ -109,6 +109,18 @@
   .f-list li{padding-left:22px;position:relative;margin-bottom:8px}
   .f-list li:before{content:"";position:absolute;left:0;top:9px;width:7px;height:7px;border-radius:50%;background:var(--teal)}
 
+  /* engine band */
+  .engine{background:linear-gradient(180deg,var(--navy-2),rgba(7,21,57,.35));border:1px solid var(--line);border-radius:24px;padding:40px 38px}
+  .models{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:30px}
+  .model{display:flex;align-items:center;gap:9px;border:1px solid var(--line);background:var(--card);border-radius:14px;padding:12px 20px;font-weight:700;font-size:15px}
+  .model i{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .rules{display:grid;grid-template-columns:repeat(2,1fr);gap:18px 34px}
+  .rule{display:flex;gap:13px}
+  .rule .k{flex:0 0 auto;width:26px;height:26px;border-radius:8px;background:rgba(5,217,240,.12);border:1px solid var(--line);
+    display:flex;align-items:center;justify-content:center;color:var(--teal);font-size:13px;font-weight:700;font-family:Georgia,serif}
+  .rule b{display:block;margin-bottom:3px;font-size:15.5px}
+  .rule span{color:var(--muted);font-size:14.5px;line-height:1.6}
+
   /* doc types */
   .types{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;max-width:720px;margin:0 auto}
   .chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:10px 20px;font-size:15px;color:var(--ink);transition:border-color .2s,transform .2s}
@@ -144,6 +156,9 @@
     .eyebrow{margin-top:8px}
     .steps{grid-template-columns:1fr}
     .feature{grid-template-columns:1fr;gap:28px;text-align:center;margin-bottom:62px}
+    .rules{grid-template-columns:1fr;gap:16px}
+    .engine{padding:30px 22px}
+    .rule{text-align:left}
     .feature.flip .f-media{order:0}
     .f-list{display:inline-block;text-align:left}
     nav .links{display:none}
@@ -175,6 +190,7 @@
       <div class="links">
         <a href="#how">How it works</a>
         <a href="#features">Features</a>
+        <a href="#engine">How it decides</a>
         <a href="#documents">Document types</a>
         <a href="#privacy">Privacy</a>
         <span style="margin-left:22px;color:#3a4d78">|</span>
@@ -291,6 +307,38 @@
           <li>Added and removed clauses are listed separately</li>
           <li>The place of each change is marked in both documents</li>
         </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="engine" style="padding-top:0">
+  <div class="wrap">
+    <h2 class="reveal">Not like asking a chatbot</h2>
+    <p class="sub reveal">Ask about the same document twice and you do not get two different answers. The code decides; the model only reads.</p>
+    <div class="engine reveal">
+      <div class="models">
+        <span class="model"><i style="background:#1F8F7A"></i>OpenAI</span>
+        <span class="model"><i style="background:#C9743B"></i>Claude</span>
+        <span class="model"><i style="background:#3D6FE0"></i>Gemini</span>
+      </div>
+      <div class="rules">
+        <div class="rule">
+          <div class="k">1</div>
+          <div><b>A fixed checklist, asked three times</b><span>Each document type has a fixed set of questions. Every question is asked three times independently, and only a finding that comes back at least twice makes the report.</span></div>
+        </div>
+        <div class="rule">
+          <div class="k">2</div>
+          <div><b>Claude and Gemini cross-check</b><span>They review the document separately. Anything they both catch that was missed is added to the report as an extra observation.</span></div>
+        </div>
+        <div class="rule">
+          <div class="k">3</div>
+          <div><b>Not in the document, not in the report</b><span>Every amount in the report appears verbatim in the document. A number that cannot be verified is turned away at the gate.</span></div>
+        </div>
+        <div class="rule">
+          <div class="k">4</div>
+          <div><b>The code computes the score</b><span>The score is not left to the model's judgement; it follows fixed rules. The same document gets the same score every time.</span></div>
+        </div>
       </div>
     </div>
   </div>

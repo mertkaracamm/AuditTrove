@@ -109,6 +109,18 @@
   .f-list li{padding-left:22px;position:relative;margin-bottom:8px}
   .f-list li:before{content:"";position:absolute;left:0;top:9px;width:7px;height:7px;border-radius:50%;background:var(--teal)}
 
+  /* engine band */
+  .engine{background:linear-gradient(180deg,var(--navy-2),rgba(7,21,57,.35));border:1px solid var(--line);border-radius:24px;padding:40px 38px}
+  .models{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:30px}
+  .model{display:flex;align-items:center;gap:9px;border:1px solid var(--line);background:var(--card);border-radius:14px;padding:12px 20px;font-weight:700;font-size:15px}
+  .model i{width:9px;height:9px;border-radius:50%;display:inline-block}
+  .rules{display:grid;grid-template-columns:repeat(2,1fr);gap:18px 34px}
+  .rule{display:flex;gap:13px}
+  .rule .k{flex:0 0 auto;width:26px;height:26px;border-radius:8px;background:rgba(5,217,240,.12);border:1px solid var(--line);
+    display:flex;align-items:center;justify-content:center;color:var(--teal);font-size:13px;font-weight:700;font-family:Georgia,serif}
+  .rule b{display:block;margin-bottom:3px;font-size:15.5px}
+  .rule span{color:var(--muted);font-size:14.5px;line-height:1.6}
+
   /* doc types */
   .types{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;max-width:720px;margin:0 auto}
   .chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:10px 20px;font-size:15px;color:var(--ink);transition:border-color .2s,transform .2s}
@@ -144,6 +156,9 @@
     .eyebrow{margin-top:8px}
     .steps{grid-template-columns:1fr}
     .feature{grid-template-columns:1fr;gap:28px;text-align:center;margin-bottom:62px}
+    .rules{grid-template-columns:1fr;gap:16px}
+    .engine{padding:30px 22px}
+    .rule{text-align:left}
     .feature.flip .f-media{order:0}
     .f-list{display:inline-block;text-align:left}
     nav .links{display:none}
@@ -175,6 +190,7 @@
       <div class="links">
         <a href="#nasil">Nasıl çalışır</a>
         <a href="#ozellikler">Özellikler</a>
+        <a href="#motor">Nasıl karar veriyor</a>
         <a href="#belgeler">Belge türleri</a>
         <a href="#gizlilik">Gizlilik</a>
         <span style="margin-left:22px;color:#3a4d78">|</span>
@@ -291,6 +307,38 @@
           <li>Eklenen ve çıkarılan maddeler ayrı ayrı listelenir</li>
           <li>Değişikliğin yeri iki belgede de işaretli</li>
         </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="motor" style="padding-top:0">
+  <div class="wrap">
+    <h2 class="reveal">Sohbet botuna sormak gibi değil</h2>
+    <p class="sub reveal">Aynı belgeyi iki kez sorduğunda iki farklı cevap almazsın. Kararı kod verir, model yalnızca okur.</p>
+    <div class="engine reveal">
+      <div class="models">
+        <span class="model"><i style="background:#1F8F7A"></i>OpenAI</span>
+        <span class="model"><i style="background:#C9743B"></i>Claude</span>
+        <span class="model"><i style="background:#3D6FE0"></i>Gemini</span>
+      </div>
+      <div class="rules">
+        <div class="rule">
+          <div class="k">1</div>
+          <div><b>Sabit kontrol listesi, üç kez</b><span>Belge türüne göre sabit sorular var. Her soru birbirinden bağımsız üç kez sorulur; yalnızca en az iki kez aynı çıkan bulgu rapora girer.</span></div>
+        </div>
+        <div class="rule">
+          <div class="k">2</div>
+          <div><b>Claude ve Gemini çapraz kontrol eder</b><span>İkisi belgeyi ayrı ayrı inceler. İkisinin birden yakaladığı, atlanmış bir madde varsa ek gözlem olarak rapora eklenir.</span></div>
+        </div>
+        <div class="rule">
+          <div class="k">3</div>
+          <div><b>Belgede yoksa raporda da yok</b><span>Rapordaki her tutar belgede harfiyen geçer. Doğrulanamayan sayı kapıdan döner, rapora giremez.</span></div>
+        </div>
+        <div class="rule">
+          <div class="k">4</div>
+          <div><b>Puanı kod hesaplar</b><span>Skor modelin yorumuna bırakılmaz, sabit kurallarla hesaplanır. Aynı belge her seferinde aynı puanı alır.</span></div>
+        </div>
       </div>
     </div>
   </div>
