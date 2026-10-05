@@ -58,6 +58,30 @@ class RubricItemTest {
     }
 
     @Test
+    void theUnilateralTerminationQuestionExcludesMutualClauses() {
+        // "Either party may terminate on the statutory notice period." cumlesi iken model bu maddeye
+        // var diyordu: soru yalnizca "karsi taraf fesih edebiliyor mu" diye sordugu icin karsilikli
+        // fesih maddesinde de cevap dogru oluyor, baslik ise alintinin tersini soyluyordu.
+        String q = RubricItem.GEN_UNILATERAL_TERMINATION.question();
+        assertThat(q).contains("the reader does not have");
+        assertThat(q).contains("either party");
+        assertThat(q).contains("present=false");
+    }
+
+    @Test
+    void questionsAboutOneSidedRightsSayWhatDoesNotCount() {
+        // Baslikta "tek tarafli" gecen her madde, karsilikli duzenlemeyi aciklikla disarida birakmali;
+        // yoksa olgu sorusu yerine yorum sorusu sorulmus olur.
+        for (RubricItem item : RubricItem.values()) {
+            String en = item.title(com.audittrove.financial.Lang.EN).toLowerCase(java.util.Locale.ROOT);
+            if (!en.contains("unilateral")) continue;
+            assertThat(item.question().toLowerCase(java.util.Locale.ROOT))
+                    .as("%s soyle bir soru sormali ki karsilikli madde var sayilmasin", item.id())
+                    .containsAnyOf("present=false", "does not have", "without the employee");
+        }
+    }
+
+    @Test
     void financialDocumentsAreAlsoAskedTheGeneralQuestions() {
         // Rakam yogun bir kredi formu "financial" sanilinca ne finansal ne sozlesme sorusu
         // tutuyor, rapor sifir bulguyla "temiz" cikiyordu. Hicbir tur bu sorulardan muaf degil.

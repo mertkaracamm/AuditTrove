@@ -115,7 +115,8 @@ public enum RubricItem {
     EMP_RELOCATION_OR_CHANGE(Kind.EMPLOYMENT, "LOW",
             "İşverene tek taraflı yer/görev değişikliği hakkı",
             "Employer may change location or duties unilaterally",
-            "Can the employer change the place of work or duties by giving notice?"),
+            "Does the contract let the employer change the employee's place of work, job title or duties "
+                    + "without the employee's separate consent at the time of the change?"),
 
     // ---- Abonelik / üyelik ----
     SUB_AUTO_RENEWAL(Kind.SUBSCRIPTION, "MEDIUM", Topic.AUTO_RENEWAL,
@@ -187,7 +188,10 @@ public enum RubricItem {
     GEN_UNILATERAL_TERMINATION(Kind.GENERAL, "HIGH", Topic.TERMINATION,
             "Karşı tarafa tek taraflı fesih hakkı",
             "Counterparty's unilateral termination right",
-            "Does the document give the other party a right to terminate unilaterally?"),
+            "Does the document give the other party a right to terminate that the reader does not have? "
+                    + "A clause letting BOTH parties terminate on the same terms (for example \"either party "
+                    + "may terminate\") is NOT such a right; answer present=false for it. Answer present=true "
+                    + "only where termination is open to the other party alone, or to them on easier conditions."),
     GEN_PENALTIES(Kind.GENERAL, "MEDIUM", Topic.PENALTY,
             "Cezai şart",
             "Penalty clause",
