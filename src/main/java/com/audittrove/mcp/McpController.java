@@ -5,7 +5,10 @@ import com.audittrove.audit.FinancialDocumentAuditService;
 import com.audittrove.audit.InvalidDocumentException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -18,6 +21,7 @@ import java.util.Map;
 
 @RestController
 public class McpController {
+    private static final String PROTOCOL_VERSION = "2025-06-18";
     private final FinancialDocumentAuditService auditService;
     private final ObjectMapper objectMapper;
 
@@ -26,38 +30,57 @@ public class McpController {
         this.objectMapper = objectMapper;
     }
 
-    /** Tarayici/GET istekleri icin bilgi cevabi — MCP istemcileri POST kullanir. */
-    @GetMapping(value = "/mcp", produces = MediaType.APPLICATION_JSON_VALUE)
+    /**
+     * Streamable HTTP'de /mcp uzerindeki GET yalnizca sunucunun actigi SSE akisi icindir. Biz akis
+     * acmadigimiz icin protokol burada 405 bekliyor; 200 ile govde donmek istemcinin tasima katmanini
+     * bozuyor ve arac kesfi basarisiz oluyor.
+     */
+    @GetMapping("/mcp")
+    public ResponseEntity<Void> noServerStream() {
+        return ResponseEntity.status(HttpStatus.METHOD_NOT_ALLOWED).header(HttpHeaders.ALLOW, "POST").build();
+    }
+
+    /** Tarayicida adrese bakanlar icin bilgi cevabi; protokol akisinin disinda, ayri yolda durur. */
+    @GetMapping(value = "/mcp/info", produces = MediaType.APPLICATION_JSON_VALUE)
     public Map<String, Object> info() {
         return Map.of(
                 "name", "audittrove",
                 "version", "1.0.1",
                 "protocol", "MCP (JSON-RPC over HTTP POST)",
-                "hint", "Send JSON-RPC requests via POST to this endpoint.");
+                "hint", "Send JSON-RPC requests via POST to /mcp.");
     }
 
     @PostMapping(value = "/mcp", consumes = MediaType.APPLICATION_JSON_VALUE,
             produces = MediaType.APPLICATION_JSON_VALUE)
-    public Map<String, Object> handle(@RequestBody JsonNode request) {
-        Object id = request.has("id") ? objectMapper.convertValue(request.get("id"), Object.class) : null;
+    public ResponseEntity<Map<String, Object>> handle(@RequestBody JsonNode request) {
+        // id tasimayan istek bir bildirimdir (ornegin el sikismayi kapatan notifications/initialized).
+        // Bildirime cevap yazilmaz; protokol govdesiz 202 bekliyor, "Method not found" donmek
+        // el sikismayi dusuruyordu.
+        if (!request.hasNonNull("id")) {
+            return ResponseEntity.accepted().build();
+        }
+        Object id = objectMapper.convertValue(request.get("id"), Object.class);
         try {
-            return switch (request.path("method").asText()) {
+            return ResponseEntity.ok(switch (request.path("method").asText()) {
+                // Surum istemciden alinir: uygulama protokol surumune bagli bir sey yapmiyor, sabit
+                // surum donmek yeni surumle gelen istemciyi gereksiz yere geri ceviriyordu.
                 case "initialize" -> success(id, Map.of(
-                        "protocolVersion", "2025-06-18",
+                        "protocolVersion", request.path("params").path("protocolVersion")
+                                .asText(PROTOCOL_VERSION),
                         "capabilities", Map.of("tools", Map.of()),
                         "serverInfo", Map.of("name", "audittrove", "version", "1.0.0")));
                 case "ping" -> success(id, Map.of());
                 case "tools/list" -> success(id, Map.of("tools", List.of(auditTool())));
                 case "tools/call" -> callTool(id, request.path("params"));
                 default -> error(id, -32601, "Method not found");
-            };
+            });
         } catch (InvalidDocumentException exception) {
             // Bozuk ya da okunamayan belge istemci hatasidir; sunucu hatasi gibi gorunmemeli.
-            return error(id, -32602, exception.getMessage());
+            return ResponseEntity.ok(error(id, -32602, exception.getMessage()));
         } catch (IllegalArgumentException exception) {
-            return error(id, -32602, exception.getMessage());
+            return ResponseEntity.ok(error(id, -32602, exception.getMessage()));
         } catch (Exception exception) {
-            return error(id, -32603, "Audit could not be completed");
+            return ResponseEntity.ok(error(id, -32603, "Audit could not be completed"));
         }
     }
 

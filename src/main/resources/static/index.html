@@ -6,8 +6,8 @@
 <title>AuditTrove - Gözden kaçanı yakala</title>
 <meta name="description" content="Sözleşme, poliçe, finansal rapor veya herhangi bir belgeyi yükle; yapay zekâ destekli, sayfa referanslı, yapılandırılmış bir inceleme raporu al. Karar vermeden önce incelet.">
 <link rel="icon" type="image/png" href="/audittrove-icon.png">
-<meta property="og:title" content="AuditTrove — Gözden kaçanı yakala">
-<meta property="og:description" content="Karar vermeden önce belgeni incelet. Yapay zekâ destekli, sayfa referanslı belge incelemesi.">
+<meta property="og:title" content="AuditTrove, gözden kaçanı yakala">
+<meta property="og:description" content="Karar vermeden önce belgeni incelet. Bulgular belgenin üstünde işaretli, her tespit sayfasına referanslı.">
 <meta property="og:type" content="website">
 <style>
   :root{
@@ -56,21 +56,25 @@
   .hero p.lead{font-size:19px;color:var(--muted);max-width:520px;margin:0 0 30px}
   .cta-row{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
   .btn{display:inline-flex;align-items:center;gap:10px;font-weight:600;border-radius:14px;padding:15px 24px;font-size:16px}
-  .btn-primary{background:linear-gradient(135deg,var(--teal-bright),var(--teal));color:#00243a;box-shadow:0 8px 30px rgba(5,217,240,.25)}
+  .btn-primary{background:linear-gradient(135deg,var(--teal-bright),var(--teal));color:#00243a;box-shadow:0 8px 30px rgba(5,217,240,.25);transition:transform .15s}
   .btn-primary:hover{transform:translateY(-1px)}
   .btn-ghost{border:1px solid var(--line);color:var(--ink)}
-  .stores{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:20px}
-  .stores a{display:inline-flex;border-radius:10px;transition:opacity .15s}
-  .stores a:hover{opacity:.82}
+
+  /* store badges */
+  .stores{display:flex;gap:14px;flex-wrap:wrap;align-items:center;margin-top:22px}
+  .stores a{display:inline-flex;border-radius:10px;transition:opacity .15s,transform .15s}
+  .stores a:hover{opacity:.85;transform:translateY(-1px)}
   .stores img{height:52px;width:auto;display:block}
 
-  /* phone in hero */
+  /* phone */
   .phone-hero{justify-self:center;position:relative}
   .phone{width:280px;border-radius:38px;border:10px solid #05102e;background:#05102e;
     box-shadow:0 30px 80px rgba(0,0,0,.55),0 0 0 1px var(--line);overflow:hidden}
   .phone img{display:block;width:100%}
   .phone-hero::after{content:"";position:absolute;inset:-40px -30px;z-index:-1;
     background:radial-gradient(50% 50% at 50% 45%, rgba(5,217,240,.18), transparent 70%)}
+  .float{animation:float 7s ease-in-out infinite}
+  @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
 
   /* trust strip */
   .strip{border-top:1px solid var(--line);border-bottom:1px solid var(--line);padding:20px 0;margin-top:24px}
@@ -84,21 +88,31 @@
 
   /* steps */
   .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
-  .step{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:30px 26px}
+  .step{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:30px 26px;transition:transform .2s,border-color .2s}
+  .step:hover{transform:translateY(-4px);border-color:#2b4a85}
   .step .n{font-family:Georgia,serif;font-size:15px;color:var(--gold);letter-spacing:.1em;margin-bottom:14px}
   .step h3{margin:0 0 8px;font-size:20px}
   .step p{margin:0;color:var(--muted);font-size:15px}
 
-  /* showcase */
-  .shots{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;align-items:start}
-  .shot{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:18px;text-align:center}
-  .shot img{width:100%;border-radius:14px;display:block;margin-bottom:16px}
-  .shot h4{margin:0 0 6px;font-size:17px}
-  .shot p{margin:0;color:var(--muted);font-size:14px}
+  /* feature rows */
+  .feature{display:grid;grid-template-columns:1fr 1fr;gap:56px;align-items:center;margin-bottom:84px}
+  .feature:last-child{margin-bottom:0}
+  .feature.flip .f-media{order:2}
+  .f-media{display:flex;justify-content:center;position:relative}
+  .f-media::after{content:"";position:absolute;inset:-30px;z-index:-1;
+    background:radial-gradient(50% 50% at 50% 50%, rgba(5,217,240,.14), transparent 70%)}
+  .f-media .phone{width:262px}
+  .f-tag{display:inline-block;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--gold);margin-bottom:12px}
+  .feature h3{font-family:Georgia,serif;font-size:clamp(24px,3vw,30px);margin:0 0 14px;line-height:1.2}
+  .feature p{color:var(--muted);margin:0 0 16px;font-size:16.5px}
+  .f-list{list-style:none;margin:0;padding:0;color:var(--muted);font-size:15px}
+  .f-list li{padding-left:22px;position:relative;margin-bottom:8px}
+  .f-list li:before{content:"";position:absolute;left:0;top:9px;width:7px;height:7px;border-radius:50%;background:var(--teal)}
 
   /* doc types */
   .types{display:flex;flex-wrap:wrap;gap:12px;justify-content:center;max-width:720px;margin:0 auto}
-  .chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:10px 20px;font-size:15px;color:var(--ink)}
+  .chip{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:10px 20px;font-size:15px;color:var(--ink);transition:border-color .2s,transform .2s}
+  .chip:hover{border-color:var(--teal);transform:translateY(-2px)}
   .chip:before{content:"";display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--teal);margin-right:9px;vertical-align:middle}
 
   /* privacy band */
@@ -118,14 +132,27 @@
   .foot-links a:hover{color:var(--ink)}
   .copy{width:100%;text-align:center;color:#5f7099;font-size:13px;margin-top:8px}
 
+  /* scroll reveal: yalnizca JS calisiyorsa gizlenir, yoksa icerik bastan goruntulenir */
+  .js .reveal{opacity:0;transform:translateY(20px);transition:opacity .7s ease,transform .7s ease}
+  .js .reveal.in{opacity:1;transform:none}
+
   @media(max-width:820px){
     .hero{grid-template-columns:1fr;text-align:center;padding-top:36px}
     .hero p.lead{margin-left:auto;margin-right:auto}
     .cta-row{justify-content:center}
     .stores{justify-content:center}
     .eyebrow{margin-top:8px}
-    .steps,.shots{grid-template-columns:1fr}
+    .steps{grid-template-columns:1fr}
+    .feature{grid-template-columns:1fr;gap:28px;text-align:center;margin-bottom:62px}
+    .feature.flip .f-media{order:0}
+    .f-list{display:inline-block;text-align:left}
     nav .links{display:none}
+  }
+
+  @media (prefers-reduced-motion: reduce){
+    .float{animation:none}
+    .js .reveal{opacity:1;transform:none;transition:none}
+    html{scroll-behavior:auto}
   }
 
   .social{display:flex;gap:14px;align-items:center}
@@ -147,6 +174,7 @@
       </div>
       <div class="links">
         <a href="#nasil">Nasıl çalışır</a>
+        <a href="#ozellikler">Özellikler</a>
         <a href="#belgeler">Belge türleri</a>
         <a href="#gizlilik">Gizlilik</a>
         <span style="margin-left:22px;color:#3a4d78">|</span>
@@ -162,7 +190,7 @@
     <h1>Karar vermeden önce, <span class="hl">gözden kaçanı yakala.</span></h1>
     <p class="lead">Sözleşme, poliçe, finansal rapor ya da herhangi bir belgeyi yükle. AuditTrove tamamını okur; sana puan, özet ve sayfa referanslı dikkat noktalarından oluşan yapılandırılmış bir inceleme raporu verir.</p>
     <div class="cta-row">
-      <a class="btn btn-primary" href="#nasil">Nasıl çalıştığını gör</a>
+      <a class="btn btn-primary" href="#ozellikler">Neler yapıyor</a>
       <a class="btn btn-ghost" href="#belgeler">Desteklenen belgeler</a>
     </div>
     <div class="stores">
@@ -171,59 +199,98 @@
     </div>
   </div>
   <div class="phone-hero">
-    <div class="phone"><img src="/shot1.jpg" alt="AuditTrove belge yükleme ekranı"></div>
+    <div class="phone float"><img src="/shot-upload.jpg" alt="AuditTrove belge yükleme ekranı"></div>
   </div>
 </section>
 
 <div class="strip">
   <div class="wrap">
-    <span><b>Tamamını okur</b> — uzun belgede yarısı atlanmaz</span>
-    <span><b>Sayfa referanslı</b> — her tespit belgedeki sayfaya bağlı</span>
-    <span><b>Tutarlı</b> — her seferinde aynı düzende rapor</span>
+    <span><b>Tamamını okur.</b> Uzun belgede yarısı atlanmaz.</span>
+    <span><b>Sayfa referanslı.</b> Her tespit belgedeki sayfaya bağlı.</span>
+    <span><b>Tutarlı.</b> Aynı belge, her seferinde aynı puan.</span>
   </div>
 </div>
 
 <section class="sec" id="nasil">
   <div class="wrap">
-    <h2>Üç adımda inceleme</h2>
-    <p class="sub">Belgeni getir, arka planda incelensin, sayfa referanslı raporunu al.</p>
+    <h2 class="reveal">Üç adımda inceleme</h2>
+    <p class="sub reveal">Belgeni getir, arka planda incelensin, sayfa referanslı raporunu al.</p>
     <div class="steps">
-      <div class="step">
+      <div class="step reveal">
         <div class="n">01</div>
         <h3>Belgeni getir</h3>
         <p>PDF seç, kamerayla tara ya da galeriden fotoğraf ekle. Belge türünü seçersin, gerisini uygulama halleder.</p>
       </div>
-      <div class="step">
+      <div class="step reveal">
         <div class="n">02</div>
         <h3>Tamamını okur</h3>
         <p>İnceleme arka planda çalışır; uygulamayı kapatsan da sürer. Hazır olunca bildirim gelir.</p>
       </div>
-      <div class="step">
+      <div class="step reveal">
         <div class="n">03</div>
         <h3>Raporunu al</h3>
-        <p>Puan, yönetici özeti, dikkat noktaları ve danışmanına sorabileceğin sorular — her tespit sayfaya referanslı.</p>
+        <p>Puan, yönetici özeti, dikkat noktaları ve danışmanına sorabileceğin sorular. Her tespit sayfasına referanslı.</p>
       </div>
     </div>
   </div>
 </section>
 
-<section class="sec" style="padding-top:0">
+<section class="sec" id="ozellikler" style="padding-top:0">
   <div class="wrap">
-    <div class="shots">
-      <div class="shot">
-        <img src="/shot1.jpg" alt="Belge yükleme">
-        <h4>Belgeni getir</h4>
-        <p>PDF, kamera ya da galeri — tek akışta.</p>
+    <h2 class="reveal">Rapor bitince iş başlıyor</h2>
+    <p class="sub reveal">Bulguyu okumakla kalmazsın: belgenin üstünde görürsün, soru sorarsın, iki sürümü karşılaştırırsın.</p>
+
+    <div class="feature reveal">
+      <div class="f-media"><div class="phone"><img src="/shot-viewer.jpg" alt="Bulgular belgenin üstünde işaretli"></div></div>
+      <div>
+        <span class="f-tag">Belgenin üstünde</span>
+        <h3>Bulgular belgenin kendi sayfasında</h3>
+        <p>Her bulgu, geldiği satırda fosforlu kalemle işaretli. Dokun, kartı oku, sonraki bulguya geç. Sayfa numarası aramakla uğraşmazsın.</p>
+        <ul class="f-list">
+          <li>Taranmış ve fotoğrafla çekilmiş belgelerde de çalışır</li>
+          <li>Her bulgu, belgede harfiyen geçen cümleye bağlı</li>
+        </ul>
       </div>
-      <div class="shot">
-        <img src="/shot2.jpg" alt="Belge türü seçimi">
-        <h4>Türünü seç</h4>
-        <p>Finansal, kira, sigorta, iş ve daha fazlası.</p>
+    </div>
+
+    <div class="feature flip reveal">
+      <div class="f-media"><div class="phone"><img src="/shot-report.jpg" alt="İnceleme raporu ve risk puanı"></div></div>
+      <div>
+        <span class="f-tag">Aynı belge, aynı puan</span>
+        <h3>Puan sabit kurallarla hesaplanır</h3>
+        <p>Skor modelin keyfine bırakılmaz. Aynı belgeyi ikinci kez incelettiğinde aynı sonucu alırsın.</p>
+        <ul class="f-list">
+          <li>Yönetici özeti, dikkat noktaları ve kilit göstergeler</li>
+          <li>Danışmanına sorabileceğin hazır sorular</li>
+          <li>Belgede harfiyen geçmeyen hiçbir tutar rapora giremez</li>
+        </ul>
       </div>
-      <div class="shot">
-        <img src="/shot3.jpg" alt="Sayfa referanslı rapor">
-        <h4>Sayfa referanslı rapor</h4>
-        <p>Puan, dikkat noktaları ve belgedeki sayfa.</p>
+    </div>
+
+    <div class="feature reveal">
+      <div class="f-media"><div class="phone"><img src="/shot-ask.jpg" alt="Rapora soru sorma ekranı"></div></div>
+      <div>
+        <span class="f-tag">Rapora soru sor</span>
+        <h3>Aklına takılanı belgeye sor</h3>
+        <p>Cevap yalnızca belgeye dayanır ve geldiği sayfayı gösterir. Belgede yazmıyorsa uydurmaz, yazmadığını söyler.</p>
+        <ul class="f-list">
+          <li>Her cevabın yanında sayfa rozeti</li>
+          <li>Soru ve cevaplar sunucuda tutulmaz</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="feature flip reveal">
+      <div class="f-media"><div class="phone"><img src="/shot-diff.jpg" alt="İki belge sürümünü karşılaştırma"></div></div>
+      <div>
+        <span class="f-tag">Sürüm karşılaştırma</span>
+        <h3>Neyin değiştiğini madde madde gör</h3>
+        <p>Yeni sürüm mü geldi? Maddeler eşleştirilir, değişen her tutar ve ifade tek listede toplanır.</p>
+        <ul class="f-list">
+          <li>Her değişiklik lehte ya da aleyhte etiketiyle gelir</li>
+          <li>Eklenen ve çıkarılan maddeler ayrı ayrı listelenir</li>
+          <li>Değişikliğin yeri iki belgede de işaretli</li>
+        </ul>
       </div>
     </div>
   </div>
@@ -231,15 +298,15 @@
 
 <section class="sec" id="belgeler" style="padding-top:0">
   <div class="wrap">
-    <h2>Her belge için</h2>
-    <p class="sub">İmzalamadan ya da karar vermeden önce, ne kabul ettiğini bil.</p>
-    <div class="types">
+    <h2 class="reveal">Her belge için</h2>
+    <p class="sub reveal">İmzalamadan ya da karar vermeden önce, ne kabul ettiğini bil.</p>
+    <div class="types reveal">
       <span class="chip">Kira sözleşmesi</span>
       <span class="chip">İş sözleşmesi</span>
       <span class="chip">Hizmet sözleşmesi</span>
-      <span class="chip">Abonelik & üyelik</span>
+      <span class="chip">Abonelik ve üyelik</span>
       <span class="chip">Sigorta poliçesi</span>
-      <span class="chip">Araç alım-satım</span>
+      <span class="chip">Araç alım satım</span>
       <span class="chip">Finansal rapor</span>
       <span class="chip">Genel belge</span>
     </div>
@@ -248,7 +315,7 @@
 
 <section class="sec" id="gizlilik" style="padding-top:0">
   <div class="wrap">
-    <div class="band">
+    <div class="band reveal">
       <h2>Belgelerin sende kalır</h2>
       <p>Belgelerin yalnızca inceleme raporunu üretmek için işlenir ve sunucularımızda kalıcı olarak saklanmaz. İnceleme sonucu yalnızca kendi cihazındaki geçmişine kaydedilir.</p>
     </div>
@@ -275,9 +342,27 @@
       <a href="/terms.html">Kullanım Koşulları</a>
       <a href="/support.html">Destek</a>
     </div>
-    <div class="copy">© 2026 AuditTrove — Gözden kaçanı yakala.</div>
+    <div class="copy">© 2026 AuditTrove. Gözden kaçanı yakala.</div>
   </div>
 </footer>
+
+<script>
+  // Bolumler gorus alanina girdiginde bir kez beliriyor; gozlemci sonrasinda birakiliyor ki
+  // asagi yukari kaydirirken tekrar tekrar oynamasin.
+  (function () {
+    if (!('IntersectionObserver' in window)) return;
+    document.documentElement.classList.add('js');
+    var items = document.querySelectorAll('.reveal');
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add('in');
+        io.unobserve(entry.target);
+      });
+    }, { rootMargin: '0px 0px -10% 0px', threshold: 0.12 });
+    items.forEach(function (el) { io.observe(el); });
+  })();
+</script>
 
 </body>
 </html>

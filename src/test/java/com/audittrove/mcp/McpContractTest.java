@@ -44,7 +44,7 @@ class McpContractTest {
     }
 
     private JsonNode call(String json) throws Exception {
-        return MAPPER.valueToTree(controller.handle(MAPPER.readTree(json)));
+        return MAPPER.valueToTree(controller.handle(MAPPER.readTree(json)).getBody());
     }
 
     @Test
@@ -151,6 +151,36 @@ class McpContractTest {
         JsonNode response = call("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"initialize\"}");
         assertThat(response.path("result").path("capabilities").has("tools")).isTrue();
         assertThat(response.path("result").path("serverInfo").path("name").asText()).isEqualTo("audittrove");
+    }
+
+    /** Istemci hangi protokol surumunu istiyorsa onu duyuruyoruz; sabit surum istemciyi geri ceviriyordu. */
+    @Test
+    void initializeEchoesTheProtocolVersionTheClientAskedFor() throws Exception {
+        JsonNode response = call("{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"initialize\","
+                + "\"params\":{\"protocolVersion\":\"2026-07-28\"}}");
+        assertThat(response.path("result").path("protocolVersion").asText()).isEqualTo("2026-07-28");
+    }
+
+    /** Surum bildirilmezse kendi surumumuzu soyluyoruz. */
+    @Test
+    void initializeFallsBackToOurOwnProtocolVersion() throws Exception {
+        JsonNode response = call("{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"initialize\"}");
+        assertThat(response.path("result").path("protocolVersion").asText()).isEqualTo("2025-06-18");
+    }
+
+    /** Bildirime cevap yazilmaz: govdesiz 202. Hata donmek el sikismayi dusuruyordu. */
+    @Test
+    void aNotificationGetsAnEmptyAcceptedResponse() throws Exception {
+        var response = controller.handle(MAPPER.readTree(
+                "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"));
+        assertThat(response.getStatusCode().value()).isEqualTo(202);
+        assertThat(response.getBody()).isNull();
+    }
+
+    /** GET yalnizca SSE akisi icin; akis acmadigimiz icin protokol 405 bekliyor. */
+    @Test
+    void getOnTheEndpointIsNotAllowed() {
+        assertThat(controller.noServerStream().getStatusCode().value()).isEqualTo(405);
     }
 
     /** Sayfa metinleri kullanicinin belgesinin kendisi; MCP yanitiyla disari cikmamali. */
