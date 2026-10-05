@@ -1,144 +1,148 @@
 <p align="center">
-  <img src="./docs/audittrove-banner.svg" alt="AuditTrove — Document Review Intelligence" width="100%">
+  <img src="./docs/audittrove-banner.svg" alt="AuditTrove" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://audittrove.com"><img alt="Website" src="https://img.shields.io/badge/audittrove.com-05D9F0?style=flat-square&logo=googlechrome&logoColor=white"></a>
+  <img alt="Java" src="https://img.shields.io/badge/Java-17-007396?style=flat-square&logo=openjdk&logoColor=white">
+  <img alt="Spring Boot" src="https://img.shields.io/badge/Spring%20Boot-3.3-6DB33F?style=flat-square&logo=springboot&logoColor=white">
+  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-316192?style=flat-square&logo=postgresql&logoColor=white">
+  <img alt="MCP" src="https://img.shields.io/badge/MCP-streamable--http-7C3AED?style=flat-square">
+  <img alt="Railway" src="https://img.shields.io/badge/deployed%20on-Railway-0B0D0E?style=flat-square&logo=railway&logoColor=white">
 </p>
 
 # AuditTrove
 
-AuditTrove is a Spring Boot service that powers **AI-assisted document review** for the AuditTrove mobile app (iOS and Android). It extracts text from uploaded documents, runs them through an OpenAI-based analysis pipeline, and returns a structured, page-referenced review: a score, an executive summary, attention points with supporting evidence, key metrics, recommended actions, and questions to ask a professional before acting.
+AuditTrove reads a document you already have, a contract, a lease, an insurance policy or a financial report, and turns it into a review you can act on: a score, a summary, and a list of findings. Every finding points at the page it came from and carries a quotation copied word for word from that page.
 
-The service is the backend for a native mobile client built with React Native / Expo ([AuditTrove-Mobile](https://github.com/mertkaracamm/AuditTrove-Mobile)). It handles device-based authentication, per-device usage quota, long-running analysis as background jobs, and push notifications when a review is ready.
+This repository is the Spring Boot service behind it. It serves three clients:
 
-> AuditTrove is a decision-support tool — not financial, accounting, investment, tax, or legal advice. For non-financial documents it reports only what the document itself says and never asserts whether a clause is legal, enforceable, or compliant. Findings must be reviewed by a qualified professional before they are relied upon.
+| Client | What it is |
+| --- | --- |
+| [AuditTrove Mobile](https://github.com/mertkaracamm/AuditTrove-Mobile) | React Native app on the App Store and Google Play |
+| ChatGPT | An MCP server at `https://audittrove.com/mcp`, exposing one tool, `audit_document` |
+| [audittrove.com](https://audittrove.com) | Marketing site, privacy policy, terms, support |
 
-## Supported document types
+> AuditTrove supports your own preliminary decision. It does not determine lawfulness or regulatory compliance, and it does not replace professional financial, legal or investment advice.
+>
+> **Documents are not stored.** A review runs on the text supplied in that request and nothing is kept afterwards.
 
-The analysis prompt adapts to the selected document type. Financial reports are the most deeply supported type; the others are reviewed as "attention points" without any legal/regulatory claims.
+<p align="center">
+  <img src="./docs/shots/report.png" width="290" alt="Review report with score and findings">
+  &nbsp;&nbsp;
+  <img src="./docs/shots/viewer.png" width="290" alt="Finding highlighted on the document page">
+</p>
 
-- Financial reports (annual/interim reports, financial statements)
-- Rental / lease agreements
-- Subscription / membership / service commitments
-- Insurance policies
-- Vehicle purchase / sale agreements
-- Employment contracts
-- General documents
+## How a review is produced
+
+The hard part is not getting a model to say something about a contract. It is getting the same document to produce the same answer twice, and making sure every sentence in the report can be traced back to the document.
+
+**1. Text extraction.** PDFBox pulls the text layer and records a page marker for every page. For the mobile app, a scan without a text layer is OCR'd with Tesseract (`tur+eng`). The MCP path does no OCR at all; it asks the caller for `documentText` or `pageTexts`, which keeps every call well inside ChatGPT's 60 second tool limit.
+
+**2. A fixed checklist, asked three times.** `RubricItem` holds a set of factual yes/no questions per document type, with titles and severities **fixed in code**, not written by the model. Each question goes to the primary model three times with different seeds, and the majority wins. One sample was not enough: on label-and-value forms the same document swung between one and six findings from run to run.
+
+**3. Cross-check across three providers.** Free-form findings from the primary model are also produced by two secondary models. A finding enters the report only if **at least two of the three models saw it**. Everything else is dropped.
+
+**4. Grounding.** A finding whose quotation cannot be located in the document is removed before the report is built. No quotation, no finding.
+
+**5. The score is computed, not asked.** The 0 to 100 score comes from the surviving findings and their severities, in code. The model never returns a number.
+
+The checklist prompt carries an explicit instruction not to cite any law or regulation and to report only what the document says.
+
+## MCP server
+
+`POST /mcp`, JSON-RPC 2.0 over Streamable HTTP, protocol version `2025-06-18`. One tool:
+
+```
+audit_document(documentText | pageTexts, filename?, language?, documentType?)
+```
+
+```bash
+curl -s https://audittrove.com/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Notifications (requests with no `id`) get a bodyless `202`. `GET /mcp` answers `405` with `Allow: POST`. `GET /mcp/info` returns a plain description of the server.
+
+Measured on production: a six page text PDF returns in about 20 seconds; the no-text-layer error returns in about 1.4 seconds.
+
+## HTTP API
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/audit` | Synchronous review |
+| `POST` | `/api/v1/audit/async` | Queue a review as a background job |
+| `GET` | `/api/v1/audit/jobs/{id}` | Poll job status and result |
+| `POST` | `/api/v1/audit/jobs/{id}/cancel` | Cancel a running job |
+| `POST` | `/api/v1/audit/chat` | Ask a question about a finished review |
+| `POST` | `/api/v1/audit/diff` | Compare two versions of a document |
+| `POST` | `/api/v1/devices` | Register a device and issue a token |
+| `POST` | `/api/v1/devices/push-token` | Store a push token for job completion |
+| `POST` | `/mcp` | MCP endpoint |
+
+Mobile clients authenticate with a device token; there is no account and no password.
 
 ## Review output
 
-Each review returns:
-
-- A score from 0 (needs line-by-line scrutiny) to 100 (generally clean) — computed **deterministically from the findings**, not taken from the model
-- A one-sentence score rationale
-- An executive summary
-- Attention points (findings) with severity and page-referenced evidence
-- Key metrics pulled from the document
-- Recommended actions
-- Advisor questions to ask before acting
-
 ```json
 {
-  "riskScore": 79,
+  "riskScore": 36,
   "scoreRationale": "…",
   "summary": "…",
-  "risks": [{ "title": "…", "severity": "MEDIUM", "finding": "…", "evidence": "… (Sayfa 10)" }],
-  "recommendations": ["…"],
-  "keyMetrics": [{ "label": "…", "value": "…", "note": "…" }],
-  "advisorQuestions": ["…"],
-  "references": [{ "source": "Rapor Sayfa 10", "article": "", "title": "" }]
+  "risks": [
+    {
+      "severity": "HIGH",
+      "title": "Post-employment non-compete",
+      "explanation": "…",
+      "page": 2,
+      "quote": "For two years after the employment ends the employee may not work for…",
+      "box": { "x": 0.12, "y": 0.34, "w": 0.76, "h": 0.04 }
+    }
+  ],
+  "metrics": [],
+  "actions": [],
+  "advisorQuestions": []
 }
 ```
 
-## How it works
+`box` is the position of the quoted passage on the page, normalised to 0..1, which is what lets the app highlight it on the rendered PDF.
 
-1. A document (PDF, or a phone scan/photo turned into a PDF on the device) is validated and its text is extracted with Apache PDFBox. Owner-password PDFs are opened; only true open-password PDFs are rejected.
-2. The text is split into `[REPORT PAGE n]` sections. Large documents are chunked so a long report is reviewed in full rather than truncated.
-3. Each section is analyzed with the configured OpenAI model against a type-specific prompt.
-4. A deterministic post-process grounds every finding's evidence to a real page marker, calibrates the score from the finding severities, and enforces a single-accounting-standard lock for financial reports (e.g. no mixing TMS and UFRS figures).
-5. The result is returned via REST, either synchronously or through the async job API.
+## Layout
 
-## API
-
-Base path: `/api/v1`.
-
-| Endpoint | Purpose |
-| --- | --- |
-| `POST /api/v1/audit` | Synchronous review (small documents) |
-| `POST /api/v1/audit/async` | Start a review; returns `202` with a `jobId` |
-| `GET /api/v1/audit/jobs/{id}` | Poll job status/result |
-| `POST /api/v1/audit/jobs/{id}/cancel` | Cancel a running review |
-| `POST /api/v1/devices` | Register a device, obtain an auth token |
-| `POST /api/v1/devices/push-token` | Register the Expo push token for a device |
-| `/swagger-ui.html` | Interactive REST API documentation |
-| `/api-docs` | OpenAPI specification |
-| `/actuator/health` | Service health check |
-
-Long documents are processed in the background so the client never blocks on a timeout. Jobs run on a small thread pool, are held in memory with a 30-minute TTL, and usage quota is only recorded when a job completes successfully. When a job finishes, the service sends an Expo push notification to the device that started it.
-
-## Security and quota
-
-- **Device auth:** stateless HMAC-SHA256 device tokens (`MobileAuthFilter`, `DeviceTokenService`, `DeviceRegistrationController`).
-- **Quota:** per-device monthly usage tracked in Postgres; a subscription (verified via RevenueCat) lifts the free-tier limit. Hourly rate limiting protects the API; polling, cancel, and push-token registration are exempt so they don't burn the limit.
-- **Privacy:** documents are processed in memory for analysis and are **not** persisted to a database. Only anonymous per-device usage counters are stored.
-
-## Technology
-
-- Java 17 / Spring Boot 3
-- Apache PDFBox (text extraction)
-- PostgreSQL (device usage; optional pgvector-ready corpus schema)
-- Flyway migrations
-- OpenAI API
-- Expo Push (server-side notifications)
-- OpenAPI / Swagger UI
-- Docker and Railway
-
-## Run locally
-
-Requirements: Java 17+, Maven 3.9+, an OpenAI API key.
-
-```bash
-export OPENAI_API_KEY="your-api-key"
-export MOBILE_TOKEN_SECRET="a-long-random-secret"
-mvn spring-boot:run
+```
+src/main/java/com/audittrove/
+├── api/         REST controllers and DTOs
+├── audit/       Review orchestration, background jobs, cancellation
+├── chat/        Follow-up questions about a finished review
+├── diff/        Version comparison between two documents
+├── financial/   Deterministic financial statement engine and language gate
+├── llm/         Primary (OpenAI) and secondary (Anthropic, Gemini) backends
+├── mcp/         MCP server
+├── pdf/         Text extraction, page markers, OCR, quote positioning
+├── report/      Checklist, scoring, report gate, quote matching
+└── security/    Device tokens, rate limiting
 ```
 
-Run the tests:
+## Running locally
 
 ```bash
-mvn clean test
+./mvnw spring-boot:run
 ```
 
-## Configuration
+Requires Java 17 and PostgreSQL. Flyway creates the schema on first boot. Swagger UI is at `/swagger-ui.html`.
 
-| Environment variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `OPENAI_API_KEY` | Yes | — | OpenAI API key used for document analysis |
-| `MOBILE_TOKEN_SECRET` | Yes | — | HMAC secret for device auth tokens |
-| `OPENAI_MODEL` | No | `gpt-4.1-mini` | Model used for the review |
-| `OPENAI_BASE_URL` | No | `https://api.openai.com` | OpenAI API base URL |
-| `OPENAI_TIMEOUT_SECONDS` | No | `90` | LLM request timeout |
-| `PORT` | No | `8080` | HTTP server port |
-| `MAX_FILE_SIZE` | No | `15MB` | Multipart upload limit |
-| `MAX_PDF_BYTES` | No | `15728640` | PDF validation limit in bytes |
-| `AUDIT_RATE_LIMIT_PER_HOUR` | No | `5` | Hourly request limit per device (production runs higher) |
-| `REVENUECAT_API_KEY` | No | — | Verifies subscription entitlements; empty means everyone is free-tier |
-| `RAG_DATABASE_URL` | No | — | PostgreSQL JDBC URL (device usage + optional corpus) |
-| `RAG_DATABASE_USERNAME` | No | — | PostgreSQL username |
-| `RAG_DATABASE_PASSWORD` | No | — | PostgreSQL password |
-| `RAG_DATABASE_MIGRATE` | No | `true` | Run Flyway migrations on startup |
+Configuration lives in `application.yml` and is overridden by environment variables in deployment. The ones that matter: the three model API keys, the database URL, the device token secret, and the free-tier limits. None of them are committed.
 
-## Docker
+## Tests
 
 ```bash
-docker build -t audittrove .
-docker run --rm -p 8080:8080 \
-  -e OPENAI_API_KEY="your-api-key" \
-  -e MOBILE_TOKEN_SECRET="a-long-random-secret" \
-  audittrove
+./mvnw test
 ```
 
-## Deploy to Railway
+23 test classes, 127 tests. They cover the parts that are easy to break and expensive to notice: the checklist questions, quote matching, score stability, the report gate, the MCP contract, and the rule that the MCP path never runs OCR.
 
-The repository includes a multi-stage `Dockerfile` and `railway.toml`. Connect the GitHub repository to a Railway project, add the environment variables above (at minimum `OPENAI_API_KEY` and `MOBILE_TOKEN_SECRET`), attach a PostgreSQL service, and deploy. Railway uses `/actuator/health` for health checks.
+## Deployment
 
-## Project status
-
-AuditTrove is in pre-release, preparing for App Store and Google Play launch. The document review pipeline, async job flow, device auth, quota, push notifications, and Railway deployment are implemented and running. Remaining pre-launch work is store submission (screenshots, listing copy, TestFlight/closed testing) and ongoing report-quality tuning.
+Railway builds from the `Dockerfile` and deploys `main`. `audittrove.com` and the Railway domain point at the same service.
